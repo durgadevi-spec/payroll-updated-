@@ -8,6 +8,7 @@ import { Button } from '../components/ui/Button';
 import { Modal } from '../components/ui/Modal';
 import { Input } from '../components/ui/Input';
 import { TableSkeleton } from '../components/ui/Skeleton';
+import { getMonthName } from '../lib/payrollCalculator';
 
 interface EmailLog {
   id: string;
@@ -57,6 +58,9 @@ export function EmailLogs() {
   const [manualEmail, setManualEmail] = useState('');
   const [manualSubject, setManualSubject] = useState('');
   const [manualBody, setManualBody] = useState('');
+  const [selectedGroupForEmail, setSelectedGroupForEmail] = useState<string>('');
+  const [selectedPayslipId, setSelectedPayslipId] = useState<string>('');
+  const [payslips, setPayslips] = useState<any[]>([]);
   const [isSendingManual, setIsSendingManual] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
 
@@ -79,17 +83,13 @@ export function EmailLogs() {
   }
 
   async function loadGroups() {
-    const { data, error } = await supabase.from('email_groups').select('*');
-    if (!error) {
-      // Fetch member counts for each group
-      const groupsWithCounts = await Promise.all((data || []).map(async (g) => {
-        const { count } = await supabase
-          .from('email_group_members')
-          .select('*', { count: 'exact', head: true })
-          .eq('group_id', g.id);
-        return { ...g, member_count: count || 0 };
-      }));
-      setGroups(groupsWithCounts);
+    try {
+      const response = await fetch('/api/email/groups');
+      if (!response.ok) throw new Error('Failed to fetch groups');
+      const data = await response.json();
+      setGroups(data);
+    } catch (error) {
+      console.error('Load groups error:', error);
     }
   }
 
@@ -98,53 +98,96 @@ export function EmailLogs() {
     setEmployees(data || []);
   }
 
+  async function loadPayslips() {
+    const { data } = await supabase
+      .from('payslips')
+      .select('id, employee:employees(name), payroll:payrolls(month, year)')
+      .order('created_at', { ascending: false })
+      .limit(50);
+    setPayslips(data || []);
+  }
+
+  useEffect(() => {
+    loadPayslips();
+  }, []);
+
   async function createGroup() {
     if (!newGroupName.trim()) return;
-    const { error } = await supabase.from('email_groups').insert([{ name: newGroupName, description: newGroupDesc }]);
-    if (error) {
-      showToast('error', 'Failed to create group');
-    } else {
+    try {
+      const response = await fetch('/api/email/groups', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newGroupName, description: newGroupDesc })
+      });
+      
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || 'Failed to create group');
+      }
+
       showToast('success', 'Group created');
       setNewGroupName('');
       setNewGroupDesc('');
       setIsGroupModalOpen(false);
       loadGroups();
+    } catch (error) {
+      console.error('Create group error:', error);
+      showToast('error', String(error));
     }
   }
 
   async function deleteGroup(id: string) {
     if (!window.confirm('Delete this group?')) return;
-    const { error } = await supabase.from('email_groups').delete().eq('id', id);
-    if (!error) {
+    try {
+      const response = await fetch(`/api/email/groups/${id}`, { method: 'DELETE' });
+      if (!response.ok) throw new Error('Failed to delete group');
       showToast('success', 'Group deleted');
       loadGroups();
+    } catch (error) {
+      showToast('error', String(error));
     }
   }
 
   async function openManageMembers(group: EmailGroup) {
     setSelectedGroup(group);
-    const { data } = await supabase.from('email_group_members').select('employee_id').eq('group_id', group.id);
-    setGroupMembers((data || []).map(m => m.employee_id));
-    setIsManageMembersModalOpen(true);
+    try {
+      const response = await fetch(`/api/email/groups/${group.id}/members`);
+      if (!response.ok) throw new Error('Failed to fetch members');
+      const data = await response.json();
+      setGroupMembers(data);
+      setIsManageMembersModalOpen(true);
+    } catch (error) {
+      showToast('error', String(error));
+    }
   }
 
   async function toggleMember(employeeId: string) {
     if (!selectedGroup) return;
     
     const isMember = groupMembers.includes(employeeId);
-    if (isMember) {
-      const { error } = await supabase.from('email_group_members').delete().eq('group_id', selectedGroup.id).eq('employee_id', employeeId);
-      if (!error) setGroupMembers(prev => prev.filter(id => id !== employeeId));
-    } else {
-      const { error } = await supabase.from('email_group_members').insert([{ group_id: selectedGroup.id, employee_id: employeeId }]);
-      if (!error) setGroupMembers(prev => [...prev, employeeId]);
+    try {
+      const response = await fetch(`/api/email/groups/${selectedGroup.id}/members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ employeeId, action: isMember ? 'remove' : 'add' })
+      });
+      
+      if (!response.ok) throw new Error('Failed to update member');
+      
+      if (isMember) {
+        setGroupMembers(prev => prev.filter(id => id !== employeeId));
+      } else {
+        setGroupMembers(prev => [...prev, employeeId]);
+      }
+      loadGroups();
+    } catch (error) {
+      showToast('error', String(error));
     }
-    loadGroups();
   }
 
   async function sendManualEmail() {
-    if (!manualEmail || !manualSubject) {
-      showToast('error', 'Recipient and subject are required');
+    if (!manualEmail && !selectedGroupForEmail) {
+      showToast('error', 'Recipient or Group is required');
       return;
     }
     setIsSendingManual(true);
@@ -155,18 +198,22 @@ export function EmailLogs() {
         body: JSON.stringify({
           employeeId: manualRecipient?.id,
           email: manualEmail,
+          groupId: selectedGroupForEmail,
           subject: manualSubject,
-          body: manualBody
+          body: manualBody,
+          payslipId: selectedPayslipId
         })
       });
       const data = await response.json();
       if (response.ok) {
-        showToast('success', 'Email sent successfully');
+        showToast('success', 'Email(s) sent successfully');
         setIsManualModalOpen(false);
         setManualRecipient(null);
         setManualEmail('');
         setManualSubject('');
         setManualBody('');
+        setSelectedGroupForEmail('');
+        setSelectedPayslipId('');
         loadLogs();
       } else {
         throw new Error(data.error || 'Failed to send');
@@ -387,9 +434,39 @@ export function EmailLogs() {
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs font-medium text-slate-500 mb-1">Select Employee (Optional)</label>
+              <label className="block text-xs font-medium text-slate-500 mb-1">Send to Group (Optional)</label>
               <select 
                 className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm"
+                value={selectedGroupForEmail}
+                onChange={(e) => setSelectedGroupForEmail(e.target.value)}
+              >
+                <option value="">Select a group...</option>
+                {groups.map(g => <option key={g.id} value={g.id}>{g.name} ({g.member_count} members)</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-500 mb-1">Attach Payslip (Optional)</label>
+              <select 
+                className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm"
+                value={selectedPayslipId}
+                onChange={(e) => setSelectedPayslipId(e.target.value)}
+              >
+                <option value="">No attachment</option>
+                {payslips.map(ps => (
+                  <option key={ps.id} value={ps.id}>
+                    {ps.employee?.name} - {getMonthName(ps.payroll?.month)} {ps.payroll?.year}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-slate-500 mb-1">Select Employee (Single)</label>
+              <select 
+                className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm"
+                disabled={!!selectedGroupForEmail}
                 onChange={(e) => {
                   const emp = employees.find(x => x.id === e.target.value);
                   if (emp) {
@@ -405,6 +482,7 @@ export function EmailLogs() {
             <Input 
               label="Recipient Email" 
               value={manualEmail} 
+              disabled={!!selectedGroupForEmail}
               onChange={(e) => setManualEmail(e.target.value)} 
               placeholder="email@example.com" 
             />

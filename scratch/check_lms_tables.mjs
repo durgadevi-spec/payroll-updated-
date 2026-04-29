@@ -11,11 +11,8 @@ async function run() {
   const client = new Client({ connectionString: lmsUrl, ssl: { rejectUnauthorized: false } });
   try {
     await client.connect();
-    
-    console.log('--- LMS users ---');
-    const res = await client.query("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'users'");
-    console.log(JSON.stringify(res.rows, null, 2));
-
+    const res = await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'");
+    console.log(res.rows.map(r => r.table_name));
   } catch (err) {
     console.error(err);
   } finally {

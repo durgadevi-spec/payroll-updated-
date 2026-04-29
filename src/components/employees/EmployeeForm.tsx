@@ -1,9 +1,15 @@
-import { useState, FormEvent } from 'react';
+import { useState, useEffect, FormEvent } from 'react';
 import { Employee } from '../../types';
 import { Input, Select } from '../ui/Input';
 import { Button } from '../ui/Button';
 
 type EmployeeFormData = Omit<Employee, 'id' | 'created_at' | 'updated_at'>;
+
+interface Department {
+  id: string;
+  name: string;
+  reporting_manager: string;
+}
 
 interface EmployeeFormProps {
   initial?: Partial<Employee>;
@@ -12,23 +18,15 @@ interface EmployeeFormProps {
   loading?: boolean;
 }
 
-const departments = [
-  { value: '', label: 'Select Department' },
-  { value: 'Engineering', label: 'Engineering' },
-  { value: 'Design', label: 'Design' },
-  { value: 'Marketing', label: 'Marketing' },
-  { value: 'Sales', label: 'Sales' },
-  { value: 'HR', label: 'HR' },
-  { value: 'Finance', label: 'Finance' },
-  { value: 'Operations', label: 'Operations' },
-  { value: 'Legal', label: 'Legal' },
-];
-
 export function EmployeeForm({ initial, onSubmit, onCancel, loading }: EmployeeFormProps) {
+  const [departments, setDepartments] = useState<Department[]>([]);
+
   const [form, setForm] = useState<EmployeeFormData>({
     name: initial?.name || '',
     email: initial?.email || '',
-    salary: initial?.salary || 0,
+    employee_code: initial?.employee_code || '',
+    ctc: initial?.ctc || 0,
+    reporting_manager: initial?.reporting_manager || '',
     department: initial?.department || '',
     designation: initial?.designation || '',
     joining_date: initial?.joining_date || '',
@@ -41,14 +39,38 @@ export function EmployeeForm({ initial, onSubmit, onCancel, loading }: EmployeeF
     status: initial?.status || 'active',
   });
 
+  // Load departments from API
+  useEffect(() => {
+    fetch('/api/departments')
+      .then(r => r.ok ? r.json() : [])
+      .then((data: Department[]) => setDepartments(data))
+      .catch(() => {});
+  }, []);
+
   const set = (field: keyof EmployeeFormData) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
-    setForm(f => ({ ...f, [field]: field === 'salary' ? Number(e.target.value) : e.target.value }));
+    const value = field === 'ctc' ? Number(e.target.value) : e.target.value;
+    setForm(f => {
+      const updated = { ...f, [field]: value };
+      // Auto-fill reporting manager when department changes
+      if (field === 'department') {
+        const dept = departments.find(d => d.name === e.target.value);
+        if (dept?.reporting_manager) {
+          updated.reporting_manager = dept.reporting_manager;
+        }
+      }
+      return updated;
+    });
   };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     await onSubmit(form);
   };
+
+  const deptOptions = [
+    { value: '', label: 'Select Department' },
+    ...departments.map(d => ({ value: d.name, label: d.name })),
+  ];
 
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
@@ -57,7 +79,7 @@ export function EmployeeForm({ initial, onSubmit, onCancel, loading }: EmployeeF
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Input label="Full Name" value={form.name} onChange={set('name')} required placeholder="John Doe" />
           <Input label="Email" type="email" value={form.email} onChange={set('email')} required placeholder="john@company.com" />
-          <Input label="Salary (₹)" type="number" value={form.salary || ''} onChange={set('salary')} required placeholder="12000" min="0" prefix="₹" />
+          <Input label="CTC/Annum (₹)" type="number" value={form.ctc || ''} onChange={set('ctc')} required placeholder="12000" min="0" prefix="₹" />
           <Input label="Joining Date" type="date" value={form.joining_date || ''} onChange={set('joining_date')} />
         </div>
       </div>
@@ -65,8 +87,20 @@ export function EmployeeForm({ initial, onSubmit, onCancel, loading }: EmployeeF
       <div>
         <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">Work Details</p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <Select label="Department" value={form.department} onChange={set('department')} options={departments} />
+          <Select label="Department" value={form.department} onChange={set('department')} options={deptOptions} />
           <Input label="Designation" value={form.designation} onChange={set('designation')} placeholder="Software Engineer" />
+          <Input
+            label="Reporting Manager"
+            value={form.reporting_manager}
+            onChange={set('reporting_manager')}
+            placeholder="Auto-filled from department"
+          />
+          <Input
+            label="Employee Code (Biometric)"
+            value={form.employee_code || ''}
+            onChange={set('employee_code')}
+            placeholder="e.g. E0047"
+          />
           <Select
             label="Status"
             value={form.status}

@@ -45,17 +45,18 @@ export function RecentActivity({ logs, loading }: RecentActivityProps) {
           <p className="text-sm">No activity yet</p>
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-4 relative before:absolute before:left-[13px] before:top-2 before:bottom-2 before:w-[1.5px] before:bg-slate-100 dark:before:bg-slate-800">
           {logs.map(log => (
-            <div key={log.id} className="flex items-start gap-3">
-              <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 ${actionColors[log.action] || 'bg-slate-100 dark:bg-slate-700 text-slate-500'}`}>
+            <div key={log.id} className="flex items-start gap-4 relative z-10">
+              <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 shadow-sm border border-white dark:border-slate-800 ${actionColors[log.action] || 'bg-slate-100 dark:bg-slate-700 text-slate-500'}`}>
                 {actionIcons[log.action] || <Clock size={12} />}
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-xs font-medium text-slate-700 dark:text-slate-200 leading-snug">
+                <p className="text-xs font-bold text-slate-700 dark:text-slate-200 leading-tight">
                   {log.action.replace(/_/g, ' ').toLowerCase().replace(/^\w/, c => c.toUpperCase())}
                 </p>
-                <p className="text-xs text-slate-400 mt-0.5">
+                <p className="text-[10px] text-slate-400 mt-1 flex items-center gap-1">
+                  <Clock size={10} />
                   {new Date(log.created_at).toLocaleString('en-IN', {
                     day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'
                   })}

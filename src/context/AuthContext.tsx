@@ -1,51 +1,69 @@
-import { createContext, useContext, useState, ReactNode } from 'react';
+import { createContext, useContext, useState, ReactNode, useEffect } from 'react';
+import { supabase } from '../lib/supabase';
+import { User } from '@supabase/supabase-js';
 
 interface AuthContextType {
   isAuthenticated: boolean;
-  userEmail: string;
-  login: (email: string, password: string) => boolean;
-  logout: () => void;
+  user: User | null;
+  loading: boolean;
+  login: (email: string, password: string) => Promise<{ error: any }>;
+  signup: (email: string, password: string) => Promise<{ error: any }>;
+  logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType>({
   isAuthenticated: false,
-  userEmail: '',
-  login: () => false,
-  logout: () => {},
+  user: null,
+  loading: true,
+  login: async () => ({ error: null }),
+  signup: async () => ({ error: null }),
+  logout: async () => {},
 });
 
-const ADMIN_EMAIL = 'admin@company.com';
-const ADMIN_PASSWORD = 'admin123';
-
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [isAuthenticated, setIsAuthenticated] = useState(() => {
-    return localStorage.getItem('payroll_auth') === 'true';
-  });
-  const [userEmail, setUserEmail] = useState(() => {
-    return localStorage.getItem('payroll_user') || '';
-  });
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const login = (email: string, password: string): boolean => {
-    if (email === ADMIN_EMAIL && password === ADMIN_PASSWORD) {
-      setIsAuthenticated(true);
-      setUserEmail(email);
-      localStorage.setItem('payroll_auth', 'true');
-      localStorage.setItem('payroll_user', email);
-      return true;
-    }
-    return false;
+  useEffect(() => {
+    // Check active sessions and sets the user
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      setLoading(false);
+    });
+
+    // Listen for changes on auth state (logged in, signed out, etc.)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      setLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const login = async (email: string, password: string) => {
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    return { error };
   };
 
-  const logout = () => {
-    setIsAuthenticated(false);
-    setUserEmail('');
-    localStorage.removeItem('payroll_auth');
-    localStorage.removeItem('payroll_user');
+  const signup = async (email: string, password: string) => {
+    const { error } = await supabase.auth.signUp({ email, password });
+    return { error };
+  };
+
+  const logout = async () => {
+    await supabase.auth.signOut();
   };
 
   return (
-    <AuthContext.Provider value={{ isAuthenticated, userEmail, login, logout }}>
-      {children}
+    <AuthContext.Provider value={{ 
+      isAuthenticated: !!user, 
+      user, 
+      loading,
+      login, 
+      signup,
+      logout 
+    }}>
+      {!loading && children}
     </AuthContext.Provider>
   );
 }

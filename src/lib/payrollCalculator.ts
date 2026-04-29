@@ -1,6 +1,7 @@
 export interface PayrollCalculationInput {
-  basicSalary: number;
-  workingDays: number;
+  monthlySalary: number;
+  workingDays: number;       // Working days (used as fallback if calendarDays not provided)
+  calendarDays?: number;     // Actual calendar days in the month (30/31) — used for per-day rate
   unpaidLeaves: number;
   missingTimesheets: number;
   bonus: number;
@@ -14,7 +15,7 @@ export interface PayrollCalculationInput {
 }
 
 export interface PayrollCalculationResult {
-  basicSalary: number;
+  monthlySalary: number;
   leaveDeduction: number;
   timesheetDeduction: number;
   pfDeduction: number;
@@ -31,8 +32,9 @@ export interface PayrollCalculationResult {
 
 export function calculatePayroll(input: PayrollCalculationInput): PayrollCalculationResult {
   const {
-    basicSalary,
+    monthlySalary,
     workingDays,
+    calendarDays,
     unpaidLeaves,
     missingTimesheets,
     bonus,
@@ -45,17 +47,20 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
     sundayWorkDays = 0,
   } = input;
 
-  const perDaySalary = basicSalary / workingDays;
+  // Use actual calendar days of the month for per-day rate (accurate pro-rata)
+  // Falls back to workingDays if calendarDays not provided
+  const daysInMonth = calendarDays ?? workingDays;
+  const perDaySalary = monthlySalary / daysInMonth;
 
   const leaveDeduction = Math.round(perDaySalary * unpaidLeaves * 100) / 100;
   const timesheetDeduction = Math.round(perDaySalary * missingTimesheets * 100) / 100;
   const sundayWorkEarnings = Math.round(perDaySalary * sundayWorkDays * 100) / 100;
 
-  const salaryAfterAttendance = basicSalary - leaveDeduction - timesheetDeduction + sundayWorkEarnings;
+  const salaryAfterAttendance = monthlySalary - leaveDeduction - timesheetDeduction + sundayWorkEarnings;
 
   const pfDeduction = Math.round((salaryAfterAttendance * pfRate) / 100 * 100) / 100;
   const esiDeduction =
-    basicSalary <= esiLimit
+    monthlySalary <= esiLimit
       ? Math.round((salaryAfterAttendance * esiRate) / 100 * 100) / 100
       : 0;
 
@@ -66,10 +71,10 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
   const totalDeductions =
     leaveDeduction + timesheetDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + advanceDeduction;
 
-  const netSalary = Math.max(0, basicSalary - totalDeductions + bonus + sundayWorkEarnings);
+  const netSalary = Math.max(0, monthlySalary - totalDeductions + bonus + sundayWorkEarnings);
 
   return {
-    basicSalary,
+    monthlySalary,
     leaveDeduction,
     timesheetDeduction,
     pfDeduction,

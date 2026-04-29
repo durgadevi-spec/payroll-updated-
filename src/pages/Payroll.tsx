@@ -107,7 +107,7 @@ export function Payroll() {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          advance_deduction: parseFloat(advanceInput) || 0,
+          // advance_deduction is NOT sent — it's auto-managed from Advance Management
           sunday_work_days: parseFloat(sundayInput) || 0,
           bonus: parseFloat(bonusInput) || 0
         })
@@ -118,7 +118,7 @@ export function Payroll() {
       showToast('success', 'Payroll item updated successfully');
       setEditingItem(null);
       if (analysisPayroll) await loadPayrollAnalysis(analysisPayroll);
-      await loadPayrolls(); // Refresh totals
+      await loadPayrolls();
     } catch (err) {
       showToast('error', 'Update failed');
     }
@@ -169,19 +169,44 @@ export function Payroll() {
         body: JSON.stringify({ employeeIds, month: genMonth, year: genYear }),
       });
 
-      const externalData = externalResponse.ok ? await externalResponse.json() : { leaves: [], timesheets: [] };
+      const externalData = externalResponse.ok ? await externalResponse.json() : { leaves: [], timesheets: [], holidayCount: 0 };
       const leaveMap = new Map((externalData.leaves || []).map((leave: { employee_id: string }) => [leave.employee_id, leave]));
       const timesheetMap = new Map((externalData.timesheets || []).map((ts: { employee_id: string }) => [ts.employee_id, ts]));
+      const holidayCount = externalData.holidayCount || 0;
+
+      // Fetch approved advances for the payroll month from Advance Management
+      const { data: advancesData } = await supabase
+        .from('advances')
+        .select('employee_id, installment_amount, balance, status, repayment_type')
+        .eq('status', 'Active')
+        .gt('balance', 0);
+      const advanceByEmp = new Map<string, number>();
+      (advancesData || []).forEach((adv: any) => {
+        const inst = parseFloat(adv.installment_amount || 0);
+        const bal = parseFloat(adv.balance || 0);
+        // If One-time or installment is not set, take the full balance.
+        const deduction = (adv.repayment_type === 'One-time' || inst === 0) ? bal : Math.min(inst, bal);
+        if (deduction > 0) {
+          advanceByEmp.set(adv.employee_id, (advanceByEmp.get(adv.employee_id) || 0) + deduction);
+        }
+      });
+
+      // Actual days in the payroll month (e.g. April=30, March=31, Feb=28/29)
+      const calendarDays = new Date(genYear, genMonth, 0).getDate();
 
       for (const emp of filteredEmployees) {
         const leaveData = leaveMap.get(emp.id);
         const tsData = timesheetMap.get(emp.id);
         const unpaidLeaves = leaveData?.unpaid_leaves || 0;
-        const missingTimesheets = tsData?.missing_days ?? workingDays;
+        // Default to 0 missing days — absence of TS data does NOT mean full month missing
+        const missingTimesheets = tsData?.missing_days ?? 0;
+        const advanceDeduction = advanceByEmp.get(emp.id) || 0;
 
+        const monthlySalary = emp.ctc / 12;
         const calc = calculatePayroll({
-          basicSalary: emp.salary,
+          monthlySalary,
           workingDays,
+          calendarDays,        // Actual days of month for accurate per-day rate
           unpaidLeaves,
           missingTimesheets,
           bonus: 0,
@@ -190,27 +215,28 @@ export function Payroll() {
           esiLimit,
           taxRate,
           loanDeduction: 0,
-          advanceDeduction: 0, // Default to 0, can be edited later
-          sundayWorkDays: 0,   // Default to 0
+          advanceDeduction,
+          sundayWorkDays: 0,
         });
 
         totalAmount += calc.netSalary;
         items.push({
           payroll_id: newPayroll.id,
           employee_id: emp.id,
-          basic_salary: calc.basicSalary,
+          monthly_salary: calc.monthlySalary,
           leave_deduction: calc.leaveDeduction,
           timesheet_deduction: calc.timesheetDeduction,
           pf_deduction: calc.pfDeduction,
           esi_deduction: calc.esiDeduction,
           tax_deduction: calc.taxDeduction,
           loan_deduction: calc.loanDeduction,
-          advance_deduction: calc.advanceDeduction,
+          advance_deduction: calc.advanceDeduction, // Auto-fetched from Advance Management
           sunday_work_days: 0,
           bonus: calc.bonus,
           net_salary: calc.netSalary,
           unpaid_leaves: unpaidLeaves,
           missing_timesheets: missingTimesheets,
+          holiday_count: holidayCount,
           working_days: workingDays,
         });
       }
@@ -256,8 +282,53 @@ export function Payroll() {
   }
 
   async function markAsPaid(payroll: PayrollType) {
-    await supabase.from('payrolls').update({ status: 'paid', paid_at: new Date().toISOString() }).eq('id', payroll.id);
-    showToast('success', `Payroll marked as paid`);
+    try {
+      // 1. Update payroll status
+      await supabase.from('payrolls').update({ status: 'paid', paid_at: new Date().toISOString() }).eq('id', payroll.id);
+
+      // 2. Fetch payroll items to find advance deductions
+      const { data: items } = await supabase
+        .from('payroll_items')
+        .select('employee_id, advance_deduction')
+        .eq('payroll_id', payroll.id)
+        .gt('advance_deduction', 0);
+      
+      if (items && items.length > 0) {
+        for (const item of items) {
+          // Find active advances for this employee (oldest first)
+          const { data: activeAdvances } = await supabase
+            .from('advances')
+            .select('*')
+            .eq('employee_id', item.employee_id)
+            .eq('status', 'Active')
+            .gt('balance', 0)
+            .order('created_at', { ascending: true });
+
+          if (activeAdvances && activeAdvances.length > 0) {
+            let remainingDeduction = item.advance_deduction;
+            for (const adv of activeAdvances) {
+              if (remainingDeduction <= 0) break;
+              
+              const deductionToApply = Math.min(adv.balance, remainingDeduction);
+              const newBalance = Math.max(0, adv.balance - deductionToApply);
+              const newStatus = newBalance <= 0 ? 'Closed' : 'Active';
+
+              await supabase.from('advances').update({ 
+                balance: newBalance,
+                status: newStatus 
+              }).eq('id', adv.id);
+
+              remainingDeduction -= deductionToApply;
+            }
+          }
+        }
+      }
+
+      showToast('success', `Payroll marked as paid and advance balances reduced`);
+    } catch (err) {
+      console.error('Error marking payroll as paid:', err);
+      showToast('error', 'Failed to update advance balances');
+    }
     await loadPayrolls();
   }
 
@@ -452,7 +523,7 @@ export function Payroll() {
               <table className="w-full text-xs">
                 <thead>
                   <tr className="bg-slate-100 dark:bg-slate-700/50 border-b border-slate-200 dark:border-slate-700">
-                    {['Employee', 'Leave Taken', 'Leave Source', 'Timesheet Status', 'Missing TS', 'Advance', 'Sunday Work', 'Net Salary', 'Actions'].map(h => (
+                    {['Employee', 'Leave Taken', 'Leave Source', 'Timesheet Status', 'Missing TS', 'Holidays', 'Advance', 'Sunday Work', 'Net Salary', 'Actions'].map(h => (
                       <th key={h} className="py-2 px-3 text-left font-semibold text-slate-600 dark:text-slate-300 whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
@@ -465,6 +536,9 @@ export function Payroll() {
                       <td className="py-2 px-3 text-slate-500 dark:text-slate-400">{item.leave_source || 'N/A'}</td>
                       <td className="py-2 px-3 text-slate-500 dark:text-slate-400">{item.timesheet_status || 'Unknown'}</td>
                       <td className="py-2 px-3 text-slate-600 dark:text-slate-300">{item.missing_timesheets} day{item.missing_timesheets === 1 ? '' : 's'}</td>
+                      <td className="py-2 px-3">
+                        <Badge variant="info" dot>{item.holiday_count || 0} holidays</Badge>
+                      </td>
                       <td className="py-2 px-3 text-red-500 font-medium">-{formatCurrency(item.advance_deduction || 0)}</td>
                       <td className="py-2 px-3 text-green-500 font-medium">+{item.sunday_work_days || 0} days</td>
                       <td className="py-2 px-3 font-semibold text-slate-800 dark:text-white">{formatCurrency(item.net_salary)}</td>
@@ -551,22 +625,20 @@ export function Payroll() {
               <strong>Note:</strong> Updating these values will automatically recalculate the employee's Net Salary.
             </p>
           </div>
+
+          <div className="p-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg">
+            <label className="block text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">Advance Deduction (₹)</label>
+            <div className="flex items-center gap-2">
+              <span className="flex-1 px-3 py-2 bg-slate-100 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-md text-sm font-semibold text-slate-700 dark:text-slate-200">
+                {formatCurrency(editingItem?.advance_deduction || 0)}
+              </span>
+              <span className="text-xs text-slate-400 italic">Auto-fetched from Advance Management</span>
+            </div>
+          </div>
           
           <div className="grid grid-cols-1 gap-4">
             <div>
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Advance Deduction (₹)</label>
-              <input
-                type="number"
-                value={advanceInput}
-                onChange={(e) => setAdvanceInput(e.target.value)}
-                className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="0"
-                min="0"
-              />
-            </div>
-            
-            <div>
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Sunday Work Days</label>
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Sunday / OD Work Days</label>
               <input
                 type="number"
                 value={sundayInput}
@@ -609,20 +681,26 @@ function PayrollBreakdown({ items, loading, onEdit }: { items: PayrollItemWithEm
         <table className="w-full text-xs">
           <thead>
             <tr className="bg-slate-100 dark:bg-slate-700/50 border-b border-slate-200 dark:border-slate-700">
-              {['Employee', 'Basic', 'Leave Taken', 'Leave Ded.', 'Missing TS', 'TS Ded.', 'Advance', 'Sunday', 'PF', 'ESI', 'Tax', 'Bonus', 'Net Salary', ''].map(h => (
+              {['Employee', 'Monthly Sal.', 'Leave Taken', 'Leave Ded.', 'Missing TS', 'TS Ded.', 'Holidays', 'Advance', 'Sunday', 'PF', 'ESI', 'Tax', 'Bonus', 'Net Salary', ''].map(h => (
                 <th key={h} className="py-2 px-3 text-left font-semibold text-slate-600 dark:text-slate-300 whitespace-nowrap">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {items.map(item => (
-              <tr key={item.id} className="border-b border-slate-100 dark:border-slate-700/30 hover:bg-white dark:hover:bg-slate-700/30">
-                <td className="py-2 px-3 font-medium text-slate-700 dark:text-slate-200">{item.employee?.name}</td>
-                <td className="py-2 px-3 text-slate-600 dark:text-slate-300">{formatCurrency(item.basic_salary)}</td>
+              <tr key={item.id} className="border-b border-slate-50 dark:border-slate-700/30 hover:bg-slate-50/50 dark:hover:bg-slate-700/20 transition-colors">
+                <td className="py-2 px-3">
+                  <div className="font-medium text-slate-700 dark:text-slate-200">{item.employee?.name}</div>
+                  <div className="text-[10px] text-slate-400">CTC: {formatCurrency(item.employee?.ctc || 0)}</div>
+                </td>
+                <td className="py-2 px-3 text-slate-600 dark:text-slate-300">{formatCurrency(item.monthly_salary)}</td>
                 <td className="py-2 px-3 text-slate-600 dark:text-slate-300">{item.unpaid_leaves} day{item.unpaid_leaves === 1 ? '' : 's'}</td>
                 <td className="py-2 px-3 text-red-500">-{formatCurrency(item.leave_deduction)}</td>
                 <td className="py-2 px-3 text-slate-600 dark:text-slate-300">{item.missing_timesheets} day{item.missing_timesheets === 1 ? '' : 's'}</td>
                 <td className="py-2 px-3 text-red-500">-{formatCurrency(item.timesheet_deduction)}</td>
+                <td className="py-2 px-3">
+                  <Badge variant="info" size="sm">{item.holiday_count || 0}h</Badge>
+                </td>
                 <td className="py-2 px-3 text-red-500">-{formatCurrency(item.advance_deduction || 0)}</td>
                 <td className="py-2 px-3 text-green-500">+{item.sunday_work_days || 0}d</td>
                 <td className="py-2 px-3 text-red-500">-{formatCurrency(item.pf_deduction)}</td>

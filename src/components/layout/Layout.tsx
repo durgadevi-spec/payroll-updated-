@@ -6,17 +6,15 @@ import { Page } from '../../types';
 interface LayoutProps {
   children: ReactNode;
   currentPage: Page;
-  onNavigate: (page: Page) => void;
 }
 
-export function Layout({ children, currentPage, onNavigate }: LayoutProps) {
+export function Layout({ children, currentPage }: LayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900 flex">
       <Sidebar
         currentPage={currentPage}
-        onNavigate={onNavigate}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />

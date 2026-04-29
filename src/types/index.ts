@@ -2,7 +2,9 @@ export interface Employee {
   id: string;
   name: string;
   email: string;
-  salary: number;
+  employee_code?: string;
+  ctc: number;
+  reporting_manager: string;
   department: string;
   designation: string;
   joining_date: string | null;
@@ -33,7 +35,7 @@ export interface PayrollItem {
   id: string;
   payroll_id: string;
   employee_id: string;
-  basic_salary: number;
+  monthly_salary: number;
   leave_deduction: number;
   timesheet_deduction: number;
   pf_deduction: number;
@@ -44,6 +46,7 @@ export interface PayrollItem {
   net_salary: number;
   unpaid_leaves: number;
   missing_timesheets: number;
+  holiday_count: number;
   working_days: number;
   created_at: string;
   employee?: Employee;
@@ -127,13 +130,17 @@ export interface AuditLog {
 
 export type Page =
   | 'dashboard'
+  | 'daily-analysis'
   | 'employees'
+  | 'attendance'
   | 'payroll'
+  | 'advance-management'
   | 'payslips'
   | 'reports'
   | 'settings'
   | 'email-logs'
-  | 'audit-logs';
+  | 'audit-logs'
+  | 'signup';
 
 export interface Toast {
   id: string;

@@ -38,6 +38,24 @@ export function Employees() {
     setLoading(false);
   }
 
+  async function handleSyncBiometric() {
+    setLoading(true);
+    try {
+      const response = await fetch('/api/employees/sync-biometric', { method: 'POST' });
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => ({}));
+        throw new Error(errorBody.error || 'Failed to sync employees');
+      }
+      const data = await response.json();
+      showToast('success', data.message || 'Employees synced successfully');
+      await loadEmployees();
+    } catch (error) {
+      console.error(error);
+      showToast('error', String(error.message || 'Failed to sync employees from biometric'));
+    }
+    setLoading(false);
+  }
+
   async function handleSave(formData: Omit<Employee, 'id' | 'created_at' | 'updated_at'>) {
     setSaving(true);
     try {
@@ -110,9 +128,14 @@ export function Employees() {
             </button>
           ))}
         </div>
-        <Button icon={<UserPlus size={16} />} onClick={() => { setEditing(null); setShowForm(true); }}>
-          Add Employee
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" icon={<UserPlus size={16} />} onClick={handleSyncBiometric}>
+            Sync Biometric
+          </Button>
+          <Button icon={<UserPlus size={16} />} onClick={() => { setEditing(null); setShowForm(true); }}>
+            Add Employee
+          </Button>
+        </div>
       </div>
 
       <Card padding={false}>
@@ -135,7 +158,7 @@ export function Employees() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-100 dark:border-slate-700">
-                  {['Employee', 'Department', 'Salary', 'Joining Date', 'Status', 'Actions'].map(h => (
+                  {['Employee', 'Department', 'Annual CTC', 'Monthly Salary', 'Joining Date', 'Status', 'Actions'].map(h => (
                     <th key={h} className={`py-3 px-4 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider ${h === 'Actions' ? 'text-right' : 'text-left'} ${['Department', 'Joining Date'].includes(h) ? 'hidden md:table-cell' : ''}`}>
                       {h}
                     </th>
@@ -153,6 +176,9 @@ export function Employees() {
                         <div>
                           <p className="font-medium text-slate-700 dark:text-slate-200 text-xs hover:text-blue-600 dark:hover:text-blue-400 transition-colors">{emp.name}</p>
                           <p className="text-slate-400 text-xs">{emp.email}</p>
+                          {emp.employee_code && (
+                            <span className="text-[10px] font-bold text-indigo-500 bg-indigo-50 dark:bg-indigo-900/30 px-1.5 py-0.5 rounded">{emp.employee_code}</span>
+                          )}
                         </div>
                       </button>
                     </td>
@@ -163,7 +189,10 @@ export function Employees() {
                       </div>
                     </td>
                     <td className="py-3 px-4">
-                      <span className="font-semibold text-slate-700 dark:text-slate-200 text-xs">{formatCurrency(emp.salary)}</span>
+                      <span className="font-semibold text-slate-700 dark:text-slate-200 text-xs">{formatCurrency(emp.ctc)}</span>
+                    </td>
+                    <td className="py-3 px-4">
+                      <span className="font-medium text-blue-600 dark:text-blue-400 text-xs">{formatCurrency(emp.ctc / 12)}</span>
                     </td>
                     <td className="py-3 px-4 hidden md:table-cell">
                       <span className="text-xs text-slate-500 dark:text-slate-400">
@@ -255,7 +284,10 @@ export function Employees() {
                 { icon: <Mail size={14} />, label: 'Email', value: viewEmployee.email },
                 { icon: <Building2 size={14} />, label: 'Department', value: viewEmployee.department || '—' },
                 { icon: <Calendar size={14} />, label: 'Joining Date', value: viewEmployee.joining_date ? new Date(viewEmployee.joining_date).toLocaleDateString('en-IN') : '—' },
-                { label: 'Salary', value: formatCurrency(viewEmployee.salary) },
+                { label: 'Employee Code (Biometric)', value: viewEmployee.employee_code || '—' },
+                { label: 'Annual CTC', value: formatCurrency(viewEmployee.ctc) },
+                { label: 'Monthly Salary', value: formatCurrency(viewEmployee.ctc / 12) },
+                { label: 'Reporting Manager', value: viewEmployee.reporting_manager || '—' },
                 { label: 'PF Number', value: viewEmployee.pf_number || '—' },
                 { label: 'UAN Number', value: viewEmployee.uan_number || '—' },
                 { label: 'Bank', value: viewEmployee.bank_name || '—' },

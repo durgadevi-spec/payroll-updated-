@@ -12,9 +12,13 @@ async function run() {
   try {
     await client.connect();
     
-    console.log('--- LMS users ---');
-    const res = await client.query("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'users'");
-    console.log(JSON.stringify(res.rows, null, 2));
+    const res3 = await client.query("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'employees'");
+    console.log('--- LMS employees ---');
+    console.log(JSON.stringify(res3.rows, null, 2));
+
+    console.log('--- permissions ---');
+    const res2 = await client.query("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'permissions'");
+    console.log(JSON.stringify(res2.rows, null, 2));
 
   } catch (err) {
     console.error(err);

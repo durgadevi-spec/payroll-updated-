@@ -26,22 +26,25 @@ export function KPICard({ title, value, subtitle, icon, iconColor, trend, loadin
   }
 
   return (
-    <Card className="hover:shadow-md transition-shadow duration-200">
+    <Card className="hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300 border-slate-100/50 dark:border-slate-700/30">
       <div className="flex items-start justify-between">
         <div className="flex-1">
-          <p className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">{title}</p>
-          <p className="text-2xl font-bold text-slate-800 dark:text-white mt-1.5">{value}</p>
+          <p className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">{title}</p>
+          <p className="text-2xl font-extrabold text-slate-800 dark:text-white mt-1.5 tracking-tight">{value}</p>
           {subtitle && (
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{subtitle}</p>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5 flex items-center gap-1.5">
+              <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-slate-600" />
+              {subtitle}
+            </p>
           )}
           {trend && (
-            <div className={`flex items-center gap-1 mt-2 text-xs font-medium ${trend.value >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500 dark:text-red-400'}`}>
-              {trend.value >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
+            <div className={`flex items-center gap-1.5 mt-2.5 px-2 py-0.5 rounded-full w-fit text-[10px] font-bold ${trend.value >= 0 ? 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400' : 'bg-red-50 dark:bg-red-900/20 text-red-500 dark:text-red-400'}`}>
+              {trend.value >= 0 ? <TrendingUp size={11} /> : <TrendingDown size={11} />}
               <span>{Math.abs(trend.value)}% {trend.label}</span>
             </div>
           )}
         </div>
-        <div className={`w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 ml-3 ${iconColor}`}>
+        <div className={`w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 ml-4 shadow-inner ${iconColor} transition-transform duration-300 group-hover:scale-110`}>
           {icon}
         </div>
       </div>

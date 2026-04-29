@@ -12,6 +12,7 @@ const pageTitles: Record<Page, string> = {
   settings: 'Settings',
   'email-logs': 'Email Logs',
   'audit-logs': 'Audit Logs',
+  signup: 'Create Account',
 };
 
 interface NavbarProps {
@@ -21,7 +22,10 @@ interface NavbarProps {
 
 export function Navbar({ currentPage, onMenuToggle }: NavbarProps) {
   const { theme, toggleTheme } = useTheme();
-  const { logout, userEmail } = useAuth();
+  const { logout, user } = useAuth();
+  const userEmail = user?.email || 'User';
+  const userName = user?.user_metadata?.full_name || (user?.email ? user.email.split('@')[0] : 'User');
+  const userInitial = userName.charAt(0).toUpperCase();
 
   return (
     <header className="h-16 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700/50 flex items-center justify-between px-4 lg:px-6 sticky top-0 z-10">
@@ -62,11 +66,11 @@ export function Navbar({ currentPage, onMenuToggle }: NavbarProps) {
         </button>
 
         <div className="flex items-center gap-2 pl-2 border-l border-slate-200 dark:border-slate-700 ml-1">
-          <div className="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-xs font-bold text-white">
-            {userEmail.charAt(0).toUpperCase()}
+          <div className="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-xs font-bold text-white uppercase">
+            {userInitial}
           </div>
           <button
-            onClick={logout}
+            onClick={() => logout()}
             className="p-1.5 rounded-lg text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
             title="Logout"
           >
