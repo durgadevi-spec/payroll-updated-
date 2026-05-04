@@ -36,6 +36,19 @@ export function Payroll() {
   const [advanceInput, setAdvanceInput] = useState('0');
   const [sundayInput, setSundayInput] = useState('0');
   const [bonusInput, setBonusInput] = useState('0');
+  const [calculationType, setCalculationType] = useState<'monthly' | 'custom' | 'working_days'>('monthly');
+  const [customDaysInput, setCustomDaysInput] = useState('30');
+
+  const countSundays = (month: number, year: number) => {
+    let sundays = 0;
+    const daysInMonth = new Date(year, month, 0).getDate();
+    for (let day = 1; day <= daysInMonth; day++) {
+      if (new Date(year, month - 1, day).getDay() === 0) {
+        sundays++;
+      }
+    }
+    return sundays;
+  };
 
   const loadPayrolls = useCallback(async () => {
     setLoading(true);
@@ -203,9 +216,18 @@ export function Payroll() {
         const advanceDeduction = advanceByEmp.get(emp.id) || 0;
 
         const monthlySalary = emp.ctc / 12;
+        
+        // Dynamic working days calculation if 'working_days' mode is selected
+        let effectiveWorkingDays = workingDays;
+        if (calculationType === 'working_days') {
+          const totalDays = new Date(genYear, genMonth, 0).getDate();
+          const sundays = countSundays(genMonth, genYear);
+          effectiveWorkingDays = totalDays - sundays;
+        }
+
         const calc = calculatePayroll({
           monthlySalary,
-          workingDays,
+          workingDays: effectiveWorkingDays,
           calendarDays,        // Actual days of month for accurate per-day rate
           unpaidLeaves,
           missingTimesheets,
@@ -217,6 +239,8 @@ export function Payroll() {
           loanDeduction: 0,
           advanceDeduction,
           sundayWorkDays: 0,
+          calculationType: calculationType,
+          customDays: calculationType === 'custom' ? parseFloat(customDaysInput) || 0 : 0
         });
 
         totalAmount += calc.netSalary;
@@ -237,7 +261,9 @@ export function Payroll() {
           unpaid_leaves: unpaidLeaves,
           missing_timesheets: missingTimesheets,
           holiday_count: holidayCount,
-          working_days: workingDays,
+          working_days: calculationType === 'working_days' ? effectiveWorkingDays : calendarDays,
+          calculation_type: calculationType,
+          calculation_days: calculationType === 'custom' ? parseFloat(customDaysInput) || 0 : (calculationType === 'working_days' ? effectiveWorkingDays : calendarDays),
         });
       }
 
@@ -600,6 +626,32 @@ export function Payroll() {
             options={[{ value: '', label: 'All Employees' }, ...employees.map(emp => ({ value: emp.id, label: emp.name }))]}
           />
         </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+          <Select
+            label="Calculation Type"
+            value={calculationType}
+            onChange={e => setCalculationType(e.target.value as any)}
+            options={[
+              { value: 'monthly', label: 'Monthly (Default)' },
+              { value: 'custom', label: 'Custom Days' },
+              { value: 'working_days', label: 'Working Days (Excl. Sundays)' },
+            ]}
+          />
+          {calculationType === 'custom' && (
+            <div>
+              <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Number of Days</label>
+              <input
+                type="number"
+                value={customDaysInput}
+                onChange={e => setCustomDaysInput(e.target.value)}
+                className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                min="1"
+                max="31"
+              />
+            </div>
+          )}
+        </div>
         <div className="mt-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
           <p className="text-blue-700 dark:text-blue-300 text-xs">
             Payroll will be calculated based on base salary, leave deductions, timesheet data, PF, ESI, and applicable taxes.
@@ -681,7 +733,7 @@ function PayrollBreakdown({ items, loading, onEdit }: { items: PayrollItemWithEm
         <table className="w-full text-xs">
           <thead>
             <tr className="bg-slate-100 dark:bg-slate-700/50 border-b border-slate-200 dark:border-slate-700">
-              {['Employee', 'Monthly Sal.', 'Leave Taken', 'Leave Ded.', 'Missing TS', 'TS Ded.', 'Holidays', 'Advance', 'Sunday', 'PF', 'ESI', 'Tax', 'Bonus', 'Net Salary', ''].map(h => (
+              {['Employee', 'Mode', 'Days', 'Monthly Sal.', 'Leave Taken', 'Leave Ded.', 'Missing TS', 'TS Ded.', 'Holidays', 'Advance', 'Sunday', 'PF', 'ESI', 'Tax', 'Bonus', 'Net Salary', ''].map(h => (
                 <th key={h} className="py-2 px-3 text-left font-semibold text-slate-600 dark:text-slate-300 whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -692,6 +744,14 @@ function PayrollBreakdown({ items, loading, onEdit }: { items: PayrollItemWithEm
                 <td className="py-2 px-3">
                   <div className="font-medium text-slate-700 dark:text-slate-200">{item.employee?.name}</div>
                   <div className="text-[10px] text-slate-400">CTC: {formatCurrency(item.employee?.ctc || 0)}</div>
+                </td>
+                <td className="py-2 px-3">
+                  <Badge variant={item.calculation_type === 'monthly' ? 'neutral' : 'info'} size="sm" className="capitalize">
+                    {item.calculation_type || 'monthly'}
+                  </Badge>
+                </td>
+                <td className="py-2 px-3 text-slate-600 dark:text-slate-300 font-medium">
+                  {item.calculation_days || (item.working_days || 26)}d
                 </td>
                 <td className="py-2 px-3 text-slate-600 dark:text-slate-300">{formatCurrency(item.monthly_salary)}</td>
                 <td className="py-2 px-3 text-slate-600 dark:text-slate-300">{item.unpaid_leaves} day{item.unpaid_leaves === 1 ? '' : 's'}</td>

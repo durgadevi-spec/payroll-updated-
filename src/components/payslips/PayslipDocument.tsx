@@ -28,7 +28,7 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
     logoText: 'AC'
   };
 
-  const perDaySalary = (item.monthly_salary || 0) / (item.working_days || 26);
+  const perDaySalary = (item.monthly_salary || 0) / (item.working_days || 30);
   const sundayEarnings = Math.round(perDaySalary * (item.sunday_work_days || 0) * 100) / 100;
 
   // Map values to labels based on template rows if available
@@ -167,8 +167,14 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
             <tr>
               <td className="border border-slate-400 p-2.5 font-bold bg-slate-50">Bank (A/C)</td>
               <td className="border border-slate-400 p-2.5 font-mono">{emp.bank_account || '—'}</td>
+              <td className="border border-slate-400 p-2.5 font-bold bg-slate-50">Calculation Mode</td>
+              <td className="border border-slate-400 p-2.5 uppercase font-semibold text-blue-600">{item.calculation_type || 'monthly'}</td>
+            </tr>
+            <tr>
               <td className="border border-slate-400 p-2.5 font-bold bg-slate-50">Payable Days</td>
               <td className="border border-slate-400 p-2.5 font-semibold text-blue-600">{item.working_days || '0'} Days</td>
+              <td className="border border-slate-400 p-2.5 font-bold bg-slate-50">Days Considered</td>
+              <td className="border border-slate-400 p-2.5 font-semibold text-blue-600">{item.calculation_days || item.working_days || '0'} Days</td>
             </tr>
           </tbody>
         </table>

@@ -48,6 +48,8 @@ export interface PayrollItem {
   missing_timesheets: number;
   holiday_count: number;
   working_days: number;
+  calculation_type?: 'monthly' | 'custom' | 'working_days';
+  calculation_days?: number;
   created_at: string;
   employee?: Employee;
 }
