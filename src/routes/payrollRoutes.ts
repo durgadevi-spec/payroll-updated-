@@ -1765,16 +1765,14 @@ router.get('/employee-monthly-report', async (req, res) => {
 
 function formatDate(date: any) {
   if (!date) return '';
-  const d = new Date(date);
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  // Always use IST (Asia/Kolkata) so deployed server (UTC) shows correct Indian date
+  return new Date(date).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 }
 
 function formatTime(date: any) {
   if (!date) return '';
-  return new Date(date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  // Always use IST (Asia/Kolkata) so deployed server (UTC) shows correct Indian time
+  return new Date(date).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' });
 }
 
 function calculateDuration(start: any, end: any) {

@@ -1,5 +1,6 @@
 import ZKLib from 'node-zklib';
 import cron from 'node-cron';
+import fs from 'fs';
 
 // ==========================================
 // CONFIGURATION - CHANGE THESE SETTINGS
@@ -27,26 +28,49 @@ async function syncBiometricData() {
         const attendances = await machine.getAttendances();
         console.log(`Found ${attendances.data.length} total attendance records on machine.`);
 
-        // The user wants to push ALL historical data to Hostinger
-        const logsToSync = attendances.data;
+        // Read the last sync time to avoid duplicating records
+        let lastSyncTime = 0;
+        try {
+            if (fs.existsSync('last-sync.txt')) {
+                const timeStr = fs.readFileSync('last-sync.txt', 'utf8');
+                lastSyncTime = new Date(timeStr.trim()).getTime();
+            }
+        } catch (e) {
+            console.log("No previous sync time found. Syncing recent data...");
+        }
 
-        console.log(`Pushing all ${logsToSync.length} logs to Hostinger. This might take a minute...`);
+        // Filter logs that happened AFTER the last sync time
+        const newLogs = attendances.data.filter(record => {
+            if (!record.recordTime) return false;
+            const logTime = new Date(record.recordTime).getTime();
+            return logTime > lastSyncTime;
+        });
+
+        console.log(`Found ${newLogs.length} NEW logs since last sync. Pushing to Hostinger...`);
+
+        if (newLogs.length === 0) {
+            console.log("✅ Nothing to sync right now.");
+            return;
+        }
 
         let successCount = 0;
         let failCount = 0;
+        let maxTime = lastSyncTime;
 
-        for (const record of logsToSync) {
+        for (const record of newLogs) {
             const emp_code = record.deviceUserId;
             // Ensure punch_time is a standard ISO string for the database
             let punch_time;
+            let currentLogTime = 0;
             if (record.recordTime) {
                 punch_time = new Date(record.recordTime).toISOString();
+                currentLogTime = new Date(record.recordTime).getTime();
             }
 
             if (!emp_code || !punch_time) continue;
 
             try {
-                // Sending to the POST /attendance route that already exists in your payrollRoutes.ts
+                // Sending to the POST /attendance route
                 const response = await fetch(HOSTINGER_URL, {
                     method: 'POST',
                     headers: {
@@ -62,6 +86,10 @@ async function syncBiometricData() {
                 
                 if (response.ok) {
                     successCount++;
+                    // Update the latest time we successfully synced
+                    if (currentLogTime > maxTime) {
+                        maxTime = currentLogTime;
+                    }
                 } else {
                     failCount++;
                 }
@@ -70,7 +98,12 @@ async function syncBiometricData() {
             }
         }
 
-        console.log(`✅ Finished! Successfully pushed ${successCount} punches to Hostinger! (${failCount} failed/duplicates)`);
+        // Save the new last sync time
+        if (maxTime > lastSyncTime) {
+            fs.writeFileSync('last-sync.txt', new Date(maxTime).toISOString());
+        }
+
+        console.log(`✅ Finished! Successfully pushed ${successCount} new punches to Hostinger! (${failCount} failed)`);
 
     } catch (error) {
         console.error('❌ Error during sync:', error.message);
