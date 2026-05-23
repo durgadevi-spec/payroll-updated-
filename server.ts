@@ -1,8 +1,13 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { payrollRouter } from './src/routes/payrollRoutes.ts';
 import { emailRouter } from './src/routes/emailRoutes.ts';
 import { startNightlyAlertScheduler, runNightlyAlerts } from './src/jobs/nightlyAlerts.ts';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 5002;
@@ -16,9 +21,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/', (req, res) => {
-  res.send('Payroll API server is running.');
-});
+
 
 app.use('/api', payrollRouter);
 app.use('/api', emailRouter);
@@ -34,13 +37,22 @@ app.post('/api/alerts/trigger', async (req, res) => {
   }
 });
 
-app.use((req, res) => {
-  res.status(404).json({ 
-    error: 'Route not found', 
-    path: req.url,
-    method: req.method,
-    message: 'Valid routes start with /api' 
-  });
+// Serve React static files from the 'dist' directory
+const distPath = path.join(__dirname, 'dist');
+app.use(express.static(distPath));
+
+// Catch-all route to serve React's index.html or return 404 for missing API routes
+app.get('*', (req, res) => {
+  if (req.url.startsWith('/api/')) {
+    res.status(404).json({ 
+      error: 'Route not found', 
+      path: req.url,
+      method: req.method,
+      message: 'Valid routes start with /api' 
+    });
+  } else {
+    res.sendFile(path.join(distPath, 'index.html'));
+  }
 });
 
 app.listen(PORT, () => {
