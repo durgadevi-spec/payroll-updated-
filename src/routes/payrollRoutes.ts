@@ -1765,14 +1765,32 @@ router.get('/employee-monthly-report', async (req, res) => {
 
 function formatDate(date: any) {
   if (!date) return '';
-  // Always use IST (Asia/Kolkata) so deployed server (UTC) shows correct Indian date
-  return new Date(date).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  // Foolproof IST (+5:30) conversion using math
+  const d = new Date(date);
+  const istTime = new Date(d.getTime() + (5.5 * 60 * 60 * 1000));
+  
+  const year = istTime.getUTCFullYear();
+  const month = String(istTime.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(istTime.getUTCDate()).padStart(2, '0');
+  
+  return `${year}-${month}-${day}`;
 }
 
 function formatTime(date: any) {
   if (!date) return '';
-  // Always use IST (Asia/Kolkata) so deployed server (UTC) shows correct Indian time
-  return new Date(date).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' });
+  // Foolproof IST (+5:30) conversion using math
+  const d = new Date(date);
+  const istTime = new Date(d.getTime() + (5.5 * 60 * 60 * 1000));
+  
+  let hours = istTime.getUTCHours();
+  const minutes = String(istTime.getUTCMinutes()).padStart(2, '0');
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  
+  hours = hours % 12;
+  hours = hours ? hours : 12; // the hour '0' should be '12'
+  const strHours = String(hours).padStart(2, '0');
+  
+  return `${strHours}:${minutes} ${ampm}`;
 }
 
 function calculateDuration(start: any, end: any) {
