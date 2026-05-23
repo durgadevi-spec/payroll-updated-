@@ -1572,7 +1572,11 @@ router.get('/daily-analysis', async (req, res) => {
         name: emp.name,
         department: emp.department,
         email: emp.email,
-        attendance: att ? { first_punch: att.first_punch, last_punch: att.last_punch, minutes: biometricMinutes } : null,
+        attendance: att ? { 
+          first_punch: formatTime(att.first_punch), 
+          last_punch: formatTime(att.last_punch), 
+          minutes: biometricMinutes 
+        } : null,
         timesheet: ts ? { hours: tsFormatted, minutes: ts.minutes, entries: ts.entries, manager_approved: ts.manager_approved, admin_approved: ts.admin_approved } : null,
         leave: leave ? { type: leave.leave_type, status: leave.status } : null,
       };
