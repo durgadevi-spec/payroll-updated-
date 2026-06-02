@@ -377,7 +377,8 @@ router.get('/payroll-processing', async (req, res) => {
 
       // Salary Calculation
       const monthlySalary = (Number(emp.ctc || 0) / 12);
-      const dayRate = monthlySalary / 26;
+      const calendarDays = new Date(selectedYear, selectedMonth, 0).getDate();
+      const dayRate = monthlySalary / calendarDays;
 
       // Basic Net Calculation (Monthly Salary - (Missing Days * Day Rate) - (Leave Days * Day Rate))
       const projectedNetSalary = Math.max(0, monthlySalary - (missingDays * dayRate) - (leaveDays * dayRate));
