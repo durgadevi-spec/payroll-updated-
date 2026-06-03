@@ -37,6 +37,8 @@ export function EmployeeForm({ initial, onSubmit, onCancel, loading }: EmployeeF
     esi_number: initial?.esi_number || '',
     uan_number: initial?.uan_number || '',
     status: initial?.status || 'active',
+    use_pa_sla: initial?.use_pa_sla || false,
+    pa_sla_balance: initial?.pa_sla_balance || 0,
   });
 
   // Load departments from API
@@ -48,7 +50,14 @@ export function EmployeeForm({ initial, onSubmit, onCancel, loading }: EmployeeF
   }, []);
 
   const set = (field: keyof EmployeeFormData) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
-    const value = field === 'ctc' ? Number(e.target.value) : e.target.value;
+    let value: any = e.target.value;
+    if (field === 'ctc' || field === 'pa_sla_balance') {
+      value = Number(e.target.value);
+    }
+    if (field === 'use_pa_sla') {
+      value = (e.target as HTMLInputElement).checked;
+    }
+    
     setForm(f => {
       const updated = { ...f, [field]: value };
       // Auto-fill reporting manager when department changes
@@ -125,6 +134,32 @@ export function EmployeeForm({ initial, onSubmit, onCancel, loading }: EmployeeF
           <Input label="PF Number" value={form.pf_number} onChange={set('pf_number')} placeholder="PF001" />
           <Input label="ESI Number" value={form.esi_number} onChange={set('esi_number')} placeholder="ESI001" />
           <Input label="UAN Number" value={form.uan_number} onChange={set('uan_number')} placeholder="UAN001" />
+        </div>
+      </div>
+
+      <div>
+        <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">Leave Balances</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+          <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-700 dark:text-slate-300">
+            <input
+              type="checkbox"
+              checked={form.use_pa_sla}
+              onChange={set('use_pa_sla')}
+              className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600"
+            />
+            Use PA/SLA Balance for Unpaid Leaves
+          </label>
+          
+          {form.use_pa_sla && (
+            <Input 
+              label="PA/SLA Balance (Days)" 
+              type="number" 
+              value={form.pa_sla_balance?.toString() || '0'} 
+              onChange={set('pa_sla_balance')} 
+              min="0" 
+              step="0.5"
+            />
+          )}
         </div>
       </div>
 

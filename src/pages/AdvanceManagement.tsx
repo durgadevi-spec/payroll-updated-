@@ -21,6 +21,7 @@ export function AdvanceManagement() {
   const [employees, setEmployees] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   
   const [formData, setFormData] = useState({
     employee_id: '',
@@ -57,18 +58,44 @@ export function AdvanceManagement() {
     if (!formData.employee_id || !formData.amount) return;
     setSubmitting(true);
     try {
-      const res = await fetch('/api/advances', {
-        method: 'POST',
+      const url = editingId ? `/api/advances/${editingId}` : '/api/advances';
+      const method = editingId ? 'PUT' : 'POST';
+      
+      const res = await fetch(url, {
+        method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(formData)
       });
       if (res.ok) {
         setShowAddModal(false);
-        setFormData({ ...formData, amount: '', reason: '', installment_amount: '', remarks: '' });
+        setEditingId(null);
+        setFormData({ employee_id: '', amount: '', date: format(new Date(), 'yyyy-MM-dd'), reason: '', repayment_type: 'Monthly', installment_amount: '', remarks: '' });
         fetchAdvances();
       }
     } catch (e) { console.error(e); }
     setSubmitting(false);
+  }
+
+  function handleEditClick(adv: any) {
+    setFormData({
+      employee_id: adv.employee_id,
+      amount: adv.amount,
+      date: format(new Date(adv.date), 'yyyy-MM-dd'),
+      reason: adv.reason || '',
+      repayment_type: adv.repayment_type || 'Monthly',
+      installment_amount: adv.installment_amount || '',
+      remarks: adv.remarks || ''
+    });
+    setEditingId(adv.id);
+    setShowAddModal(true);
+  }
+
+  async function handleDeleteClick(advId: string) {
+    if (!confirm('Are you sure you want to delete this advance?')) return;
+    try {
+      const res = await fetch(`/api/advances/${advId}`, { method: 'DELETE' });
+      if (res.ok) fetchAdvances();
+    } catch (e) { console.error(e); }
   }
 
   const activeAdvances = advances.filter(a => a.status === 'Active');
@@ -84,7 +111,11 @@ export function AdvanceManagement() {
           <p className="text-slate-500 text-sm mt-1">Manage employee salary advances and deductions</p>
         </div>
         <button 
-          onClick={() => setShowAddModal(true)}
+          onClick={() => {
+            setEditingId(null);
+            setFormData({ employee_id: '', amount: '', date: format(new Date(), 'yyyy-MM-dd'), reason: '', repayment_type: 'Monthly', installment_amount: '', remarks: '' });
+            setShowAddModal(true);
+          }}
           className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
         >
           <Plus size={16} />
@@ -174,10 +205,10 @@ export function AdvanceManagement() {
                   </td>
                   <td className="px-6 py-4 text-right">
                     <div className="flex items-center justify-end gap-2">
-                      <button className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-colors">
+                      <button onClick={() => handleEditClick(adv)} className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-colors">
                         <Edit size={16} />
                       </button>
-                      <button className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-md transition-colors">
+                      <button onClick={() => handleDeleteClick(adv.id)} className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-md transition-colors">
                         <Trash2 size={16} />
                       </button>
                       <button className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-md transition-colors">
@@ -192,14 +223,14 @@ export function AdvanceManagement() {
         </div>
       </div>
 
-      {/* Add Advance Modal (Mock) */}
+      {/* Add/Edit Advance Modal */}
       {showAddModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white dark:bg-slate-900 rounded-xl shadow-xl w-full max-w-2xl overflow-hidden border border-slate-200 dark:border-slate-700">
             <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex justify-between items-center">
-              <h2 className="text-xl font-bold text-slate-800 dark:text-white">New Advance Entry</h2>
+              <h2 className="text-xl font-bold text-slate-800 dark:text-white">{editingId ? 'Edit Advance' : 'New Advance Entry'}</h2>
               <button onClick={() => setShowAddModal(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300">
-                <MoreVertical size={20} className="rotate-45" /> {/* Close icon approximation */}
+                <MoreVertical size={20} className="rotate-45" />
               </button>
             </div>
             <div className="p-6 space-y-4">

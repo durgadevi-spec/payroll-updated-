@@ -15,6 +15,8 @@ export interface Employee {
   esi_number: string;
   uan_number: string;
   status: 'active' | 'inactive';
+  use_pa_sla?: boolean;
+  pa_sla_balance?: number;
   created_at: string;
   updated_at: string;
 }
@@ -48,6 +50,9 @@ export interface PayrollItem {
   missing_timesheets: number;
   holiday_count: number;
   working_days: number;
+  pa_sla_consumed?: number;
+  timesheet_excluded_dates?: string[];
+  holiday_dates?: string[];
   calculation_type?: 'monthly' | 'custom' | 'working_days';
   calculation_days?: number;
   created_at: string;

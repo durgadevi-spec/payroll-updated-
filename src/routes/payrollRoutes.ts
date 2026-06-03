@@ -377,7 +377,8 @@ router.get('/payroll-processing', async (req, res) => {
 
       // Salary Calculation
       const monthlySalary = (Number(emp.ctc || 0) / 12);
-      const dayRate = monthlySalary / 26;
+      const calendarDays = new Date(selectedYear, selectedMonth, 0).getDate();
+      const dayRate = monthlySalary / calendarDays;
 
       // Basic Net Calculation (Monthly Salary - (Missing Days * Day Rate) - (Leave Days * Day Rate))
       const projectedNetSalary = Math.max(0, monthlySalary - (missingDays * dayRate) - (leaveDays * dayRate));
@@ -572,6 +573,8 @@ router.post('/employees', async (req, res) => {
     esi_number = '',
     uan_number = '',
     status = 'active',
+    use_pa_sla = false,
+    pa_sla_balance = 0,
   } = req.body;
 
   const validJoiningDate = joining_date && joining_date !== "" ? joining_date : null;
@@ -580,9 +583,9 @@ router.post('/employees', async (req, res) => {
   try {
     client = await payrollPool.connect();
     const insert = await client.query(
-      `INSERT INTO employees (name, email, employee_code, ctc, reporting_manager, department, designation, joining_date, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
-      [name, email, employee_code || null, ctc, reporting_manager, department, designation, validJoiningDate, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status]
+      `INSERT INTO employees (name, email, employee_code, ctc, reporting_manager, department, designation, joining_date, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING *`,
+      [name, email, employee_code || null, ctc, reporting_manager, department, designation, validJoiningDate, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance]
     );
 
     const employee = insert.rows[0];
@@ -618,6 +621,8 @@ router.put('/employees/:id', async (req, res) => {
     esi_number = '',
     uan_number = '',
     status = 'active',
+    use_pa_sla = false,
+    pa_sla_balance = 0,
   } = req.body;
 
   const validJoiningDate = joining_date && joining_date !== "" ? joining_date : null;
@@ -626,9 +631,9 @@ router.put('/employees/:id', async (req, res) => {
   try {
     client = await payrollPool.connect();
     const update = await client.query(
-      `UPDATE employees SET name=$1, email=$2, employee_code=$3, ctc=$4, reporting_manager=$5, department=$6, designation=$7, joining_date=$8, bank_name=$9, bank_account=$10, ifsc_code=$11, pf_number=$12, esi_number=$13, uan_number=$14, status=$15, updated_at=NOW()
-       WHERE id=$16 RETURNING *`,
-      [name, email, employee_code || null, ctc, reporting_manager, department, designation, validJoiningDate, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, id]
+      `UPDATE employees SET name=$1, email=$2, employee_code=$3, ctc=$4, reporting_manager=$5, department=$6, designation=$7, joining_date=$8, bank_name=$9, bank_account=$10, ifsc_code=$11, pf_number=$12, esi_number=$13, uan_number=$14, status=$15, use_pa_sla=$16, pa_sla_balance=$17, updated_at=NOW()
+       WHERE id=$18 RETURNING *`,
+      [name, email, employee_code || null, ctc, reporting_manager, department, designation, validJoiningDate, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance, id]
     );
 
     const employee = update.rows[0];
@@ -815,24 +820,29 @@ router.post('/employees/sync-biometric', async (req, res) => {
 router.post('/payroll-items/external-data', async (req, res) => {
   const { employeeIds, month, year } = req.body;
 
-  const leaveMap: Record<string, { employee_id: string; unpaid_leaves: number; total_leaves: number; paid_leaves: number; leave_type: string }> = {};
-  const timesheetMap: Record<string, { employee_id: string; missing_days: number; submitted_at: string | null }> = {};
+  const leaveMap: Record<string, { employee_id: string; unpaid_leaves: number; total_leaves: number; paid_leaves: number; leave_type: string; leave_dates: string[]; pa_sla_consumed?: number }> = {};
+  const timesheetMap: Record<string, { employee_id: string; missing_days: number; submitted_at: string | null; missing_dates: string[] }> = {};
 
   let pClient, lmsClient, timesheetClient;
 
   try {
     pClient = await payrollPool.connect();
-    const namesRes = await pClient.query('SELECT id, name, email FROM employees WHERE id = ANY($1)', [employeeIds]);
+    const namesRes = await pClient.query('SELECT id, name, email, employee_code, department, use_pa_sla, pa_sla_balance FROM employees WHERE id = ANY($1)', [employeeIds]);
     const empData = namesRes.rows;
     const settingsResult = await pClient.query('SELECT value FROM settings WHERE key = \'working_days\'');
     const workingDays = parseInt(settingsResult.rows[0]?.value || '26');
-    // Fetch holidays for the month
+    // Fetch ALL holidays for the month (with optional department filter)
     const holidayRes = await pClient.query(
-      `SELECT date FROM holidays WHERE EXTRACT(MONTH FROM date) = $1 AND EXTRACT(YEAR FROM date) = $2`,
+      `SELECT date, applicable_departments FROM holidays WHERE EXTRACT(MONTH FROM date) = $1 AND EXTRACT(YEAR FROM date) = $2`,
       [month, year]
     );
-    const holidays = holidayRes.rows.map(r => new Date(r.date).toISOString().split('T')[0]);
-    const holidayCount = holidays.length;
+    // All holiday dates (global)
+    const allHolidays: { date: string; applicable_departments: string[] | null }[] = holidayRes.rows.map(r => ({
+      date: new Date(r.date).toISOString().split('T')[0],
+      applicable_departments: r.applicable_departments || null
+    }));
+    const globalHolidays = allHolidays.filter(h => !h.applicable_departments || h.applicable_departments.length === 0).map(h => h.date);
+    const holidayCount = globalHolidays.length;
 
     pClient.release();
 
@@ -840,25 +850,24 @@ router.post('/payroll-items/external-data', async (req, res) => {
       lmsClient = await lmsPool.connect();
       for (const emp of empData) {
         try {
+          // Fetch all approved leave dates with leave_type per date
           const leaveQuery = `
             SELECT 
-              SUM(CASE 
-                WHEN l.leave_duration_type = 'Half Day' THEN 0.5 
-                ELSE 1.0 
-              END) as unpaid_leaves,
-              SUM(CASE 
-                WHEN l.leave_duration_type = 'Half Day' THEN 0.5 
-                ELSE 1.0 
-              END) as total_leaves,
-              0 as paid_leaves,
-              MAX(l.leave_type) as leave_type
+              d::date AS leave_date,
+              l.leave_type,
+              l.leave_duration_type
             FROM employees e
             JOIN leaves l ON e.employee_code = l.user_id
+            CROSS JOIN LATERAL (
+              SELECT CAST(d::date AS date) AS d FROM generate_series(
+                CAST(l.start_date AS date),
+                CAST(l.end_date AS date),
+                '1 day'::interval
+              ) d
+            ) dates
             WHERE l.status = 'Approved'
-              AND (
-                (EXTRACT(MONTH FROM l.start_date) = $2 AND EXTRACT(YEAR FROM l.start_date) = $3)
-                OR (EXTRACT(MONTH FROM l.end_date) = $2 AND EXTRACT(YEAR FROM l.end_date) = $3)
-              )
+              AND EXTRACT(MONTH FROM d::date) = $2
+              AND EXTRACT(YEAR FROM d::date) = $3
               AND (
                 e.id = $1 
                 OR LOWER(TRIM(e.name)) = LOWER(TRIM($4))
@@ -866,20 +875,63 @@ router.post('/payroll-items/external-data', async (req, res) => {
                 OR ($4 ILIKE e.name || '%')
                 OR LOWER(TRIM(e.employee_code)) = LOWER(TRIM($5))
               )
-            GROUP BY e.id
           `;
-          console.log(`[EXTERNAL-DATA] Fetching leaves for ${emp.name} (${emp.id})`);
-          const leaveRes = await lmsClient.query(leaveQuery, [emp.id, month, year, emp.name, emp.email]);
+          console.log(`[EXTERNAL-DATA] Fetching leaves for ${emp.name} (code: ${emp.employee_code || 'N/A'})`);
+          const leaveRes = await lmsClient.query(leaveQuery, [emp.id, month, year, emp.name, emp.employee_code || emp.email]);
 
           if (leaveRes.rows.length > 0) {
-            const row = leaveRes.rows[0];
-            const unpaid = parseFloat(String(row.unpaid_leaves || 0));
-            console.log(`[EXTERNAL-DATA] ✅ Found ${unpaid} leaves for ${emp.name}`);
+            // Separate OD dates from real leave dates
+            const allLeaveDates: string[] = [];
+            const odDates: string[] = [];
+            let unpaidCount = 0;
+            let totalCount = 0;
+            const leaveTypeSummary: string[] = [];
+
+            for (const row of leaveRes.rows) {
+              const d = new Date(row.leave_date).toISOString().split('T')[0];
+              const dayValue = row.leave_duration_type === 'Half Day' ? 0.5 : 1.0;
+              allLeaveDates.push(d);
+              totalCount += dayValue;
+              leaveTypeSummary.push(row.leave_type);
+
+              if (row.leave_type === 'OD') {
+                // OD = On Duty: no salary deduction, but still overlaps with TS missing
+                odDates.push(d);
+              } else {
+                // All other leave types (Casual, Sick, Earned, LWP, Comp Off) = unpaid
+                unpaidCount += dayValue;
+              }
+            }
+
+            const uniqueAllLeaveDates = [...new Set(allLeaveDates)];
+            const originalUnpaid = unpaidCount;
+            let actualUnpaid = originalUnpaid;
+            let paSlaConsumed = 0;
+
+            if (emp.use_pa_sla && Number(emp.pa_sla_balance) > 0) {
+              const balance = Number(emp.pa_sla_balance);
+              if (balance >= originalUnpaid) {
+                actualUnpaid = 0;
+                paSlaConsumed = originalUnpaid;
+              } else {
+                actualUnpaid = originalUnpaid - balance;
+                paSlaConsumed = balance;
+              }
+            }
+
+            const primaryLeaveType = leaveTypeSummary.find(t => t !== 'OD') || leaveTypeSummary[0] || 'Leave';
+            
+            console.log(`[EXTERNAL-DATA] ✅ ${emp.name}: ${totalCount} total leaves, ${originalUnpaid} unpaid (excl OD), ${odDates.length} OD dates, actual unpaid after PA/SLA: ${actualUnpaid}`);
             leaveMap[emp.id] = {
-              ...row,
               employee_id: emp.id,
-              unpaid_leaves: unpaid,
-              total_leaves: parseFloat(String(row.total_leaves || 0))
+              unpaid_leaves: actualUnpaid,
+              total_leaves: totalCount,
+              paid_leaves: 0,
+              leave_type: primaryLeaveType,
+              leave_dates: uniqueAllLeaveDates,  // ALL leave dates (incl OD) for TS exclusion
+              od_dates: odDates,
+              pa_sla_consumed: paSlaConsumed,
+              dates: uniqueAllLeaveDates
             };
           } else {
             console.log(`[EXTERNAL-DATA] ❌ No leaves found for ${emp.name}`);
@@ -894,14 +946,22 @@ router.post('/payroll-items/external-data', async (req, res) => {
       console.log(`[EXTERNAL-DATA] Querying timesheet for Month: ${month}, Year: ${year}`);
       timesheetClient = await timesheetPool.connect();
 
-      const codes = empData.map((e: any) => {
-        const code = e.name.includes('REBECA') ? 'E0046' : (e.email || '').toUpperCase();
-        return code;
+      const candidateMap = empData.map((e: any) => {
+        const normalizedEmail = (e.email || '').toUpperCase();
+        const normalizedName = (e.name || '').toUpperCase().trim();
+        const normalizedEmpCode = (e.employee_code || '').toUpperCase();
+        const codes = new Set<string>();
+        if (e.name.includes('REBECA')) codes.add('E0046');
+        if (normalizedEmpCode) codes.add(normalizedEmpCode);
+        if (normalizedEmail) codes.add(normalizedEmail);
+        if (normalizedName) codes.add(normalizedName);
+        return { emp: e, codes: Array.from(codes) };
       });
+      const codes = Array.from(new Set(candidateMap.flatMap(c => c.codes)));
       console.log(`[EXTERNAL-DATA] Searching for codes: ${JSON.stringify(codes)}`);
 
       const tsRes = await timesheetClient.query(
-        `SELECT employee_code, count(DISTINCT CAST(date as date)) as days_worked 
+        `SELECT employee_code, ARRAY_AGG(DISTINCT CAST(date as date)) as worked_dates 
          FROM time_entries 
          WHERE UPPER(employee_code) = ANY($1) AND EXTRACT(MONTH FROM CAST(date as date)) = $2 AND EXTRACT(YEAR FROM CAST(date as date)) = $3
          GROUP BY employee_code`,
@@ -912,35 +972,49 @@ router.post('/payroll-items/external-data', async (req, res) => {
 
       const calendarDays = new Date(year, month, 0).getDate();
       for (const row of tsRes.rows) {
-        console.log(`[EXTERNAL-DATA] Row from DB: ${row.employee_code}, Days Worked: ${row.days_worked}`);
-        const emp = empData.find((e: any) => {
-          const matchCode = e.name.includes('REBECA') ? 'E0046' : (e.email || '').toUpperCase();
-          return matchCode === row.employee_code.toUpperCase();
-        });
+        const rowCode = (row.employee_code || '').toUpperCase();
+        const empMatch = candidateMap.find((entry: any) => entry.codes.includes(rowCode));
+        const emp = empMatch?.emp;
 
         if (emp) {
-          const worked = parseInt(row.days_worked);
-          // Account for holidays and Sundays: they should not cause deductions.
-          // Target is calendar days of the month.
-          // We assume people don't work on Sundays (4-5 days) and holidays.
-          // We need to count Sundays in the month.
-          let sundays = 0;
-          let curr = new Date(year, month - 1, 1);
-          const end = new Date(year, month, 0);
-          while (curr <= end) {
-            if (curr.getDay() === 0) sundays++;
-            curr.setDate(curr.getDate() + 1);
-          }
+          const workedDates = (row.worked_dates || []).map((d: Date | string) => new Date(d).toISOString().split('T')[0]);
+          const workedDatesSet = new Set(workedDates);
 
-          // missing = calendarDays - worked - holidays - sundays
-          const missing = Math.max(0, calendarDays - worked - holidayCount - sundays);
+          // Determine which holidays apply to this employee based on their department
+          const empDept = (emp.department || '').toLowerCase().trim();
+          const empHolidays = allHolidays
+            .filter(h => !h.applicable_departments || h.applicable_departments.length === 0 || h.applicable_departments.map(d => d.toLowerCase().trim()).includes(empDept))
+            .map(h => h.date);
+          const empHolidaySet = new Set(empHolidays);
+          
+          let rawMissingDates: string[] = [];
+          for (let d = 1; d <= calendarDays; d++) {
+            const dt = new Date(year, month - 1, d);
+            const dstr = dt.toISOString().split('T')[0];
+            if (dt.getDay() === 0) continue; // Skip Sunday
+            if (empHolidaySet.has(dstr)) continue; // Skip applicable holidays
+            if (!workedDatesSet.has(dstr)) {
+              rawMissingDates.push(dstr);
+            }
+          }
+          
+          // Compute excluded dates: missing TS dates that fall on approved leave dates (no deduction)
+          const empLeaves = leaveMap[emp.id];
+          const leaveDateSet = new Set(empLeaves?.leave_dates || []);
+          const excludedDates = rawMissingDates.filter(d => leaveDateSet.has(d));
+          const actualMissingDates = rawMissingDates.filter(d => !leaveDateSet.has(d));
+          
+          const missing = actualMissingDates.length;
           
           console.log(`[EXTERNAL-DATA] ✅ MATCHED code ${row.employee_code} to employee ${emp.name} (${emp.id})`);
-          console.log(`[EXTERNAL-DATA] Calculation: ${calendarDays} (calendar) - ${worked} (worked) - ${holidayCount} (holidays) - ${sundays} (sundays) = ${missing} missing`);
+          console.log(`[EXTERNAL-DATA] Raw missing: ${rawMissingDates.length}, Excluded (on leave): ${excludedDates.length}, Final: ${missing}`);
           
           timesheetMap[emp.id] = {
             employee_id: emp.id,
             missing_days: missing,
+            missing_dates: actualMissingDates,
+            excluded_dates: excludedDates,
+            holiday_dates: empHolidays,
             submitted_at: new Date().toISOString()
           };
         } else {
@@ -954,7 +1028,7 @@ router.post('/payroll-items/external-data', async (req, res) => {
     res.json({ 
       leaves: Object.values(leaveMap), 
       timesheets: Object.values(timesheetMap),
-      holidays: holidays,
+      holidays: globalHolidays,
       holidayCount: holidayCount
     });
 
@@ -1153,9 +1227,12 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       [payroll.month, payroll.year]
     );
     const holidayCount = holidayRes.rows.length;
+    const holidaySet = new Set(holidayRes.rows.map((r: any) => new Date(r.date).toISOString().split('T')[0]));
+    const holidayDatesAll = Array.from(holidaySet) as string[];
 
     const itemsResult = await payrollClient.query(
       `SELECT pi.*, e.id AS employee_id, e.name AS employee_name, e.email AS employee_email, e.designation AS employee_designation, e.department AS employee_department, e.bank_account AS employee_bank_account, e.pf_number AS employee_pf_number, e.uan_number AS employee_uan_number
+       , e.employee_code AS employee_code
        FROM payroll_items pi
        JOIN employees e ON e.id = pi.employee_id
        WHERE pi.payroll_id = $1`,
@@ -1182,30 +1259,32 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
     const enriched = [];
     for (const item of itemsResult.rows as (PayrollItemAnalysisRow & { monthly_salary: number })[]) {
       const monthlySalary = item.monthly_salary || 0;
-      let leaveData: { unpaid_leaves?: number; leave_type?: string } | null = null;
-      let tsData: { missing_days?: number; submitted_at?: string } | null = null;
+      let leaveData: { unpaid_leaves?: number; leave_type?: string; leave_dates?: string[] } | null = null;
+      let tsData: { missing_days?: number; submitted_at?: string; missing_dates?: string[]; excluded_dates?: string[] } | null = null;
+      
+      // Use stored excluded/holiday dates if already saved (for current payrolls)
+      const storedExcludedDates: string[] = (item.timesheet_excluded_dates as any) || [];
+      const storedHolidayDates: string[] = (item.holiday_dates as any) || [];
 
       if (lmsClient) {
         try {
           const leaveQuery = `
             SELECT 
-              SUM(CASE 
-                WHEN l.leave_duration_type = 'Half Day' THEN 0.5 
-                ELSE 1.0 
-              END) as unpaid_leaves,
-              SUM(CASE 
-                WHEN l.leave_duration_type = 'Half Day' THEN 0.5 
-                ELSE 1.0 
-              END) as total_leaves,
-              0 as paid_leaves,
-              MAX(l.leave_type) as leave_type
+              d::date AS leave_date,
+              l.leave_type,
+              l.leave_duration_type
             FROM employees e
             JOIN leaves l ON e.employee_code = l.user_id
+            CROSS JOIN LATERAL (
+              SELECT CAST(d::date AS date) AS d FROM generate_series(
+                CAST(l.start_date AS date),
+                CAST(l.end_date AS date),
+                '1 day'::interval
+              ) d
+            ) dates
             WHERE l.status = 'Approved'
-              AND (
-                (EXTRACT(MONTH FROM l.start_date) = $2 AND EXTRACT(YEAR FROM l.start_date) = $3)
-                OR (EXTRACT(MONTH FROM l.end_date) = $2 AND EXTRACT(YEAR FROM l.end_date) = $3)
-              )
+              AND EXTRACT(MONTH FROM d::date) = $2
+              AND EXTRACT(YEAR FROM d::date) = $3
               AND (
                 e.id = $1 
                 OR LOWER(TRIM(e.name)) = LOWER(TRIM($4))
@@ -1213,56 +1292,158 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
                 OR ($4 ILIKE e.name || '%')
                 OR LOWER(TRIM(e.employee_code)) = LOWER(TRIM($5))
               )
-            GROUP BY e.id
           `;
           const leaveRes = await lmsClient.query(leaveQuery, [item.employee_id, payroll.month, payroll.year, item.employee_name, item.employee_email]);
           if (leaveRes.rows.length > 0) {
-            console.log(`LMS Match for ${item.employee_name} in analysis: ${leaveRes.rows[0].unpaid_leaves} days`);
+            const allLeaveDates: string[] = [];
+            const odDates: string[] = [];
+            let unpaidCount = 0;
+            let totalCount = 0;
+            const leaveTypeSummary: string[] = [];
+
+            for (const row of leaveRes.rows) {
+              const d = new Date(row.leave_date).toISOString().split('T')[0];
+              const dayValue = row.leave_duration_type === 'Half Day' ? 0.5 : 1.0;
+              allLeaveDates.push(d);
+              totalCount += dayValue;
+              leaveTypeSummary.push(row.leave_type);
+              if (row.leave_type === 'OD') {
+                odDates.push(d);
+              } else {
+                unpaidCount += dayValue;
+              }
+            }
+
+            const uniqueAllLeaveDates = [...new Set(allLeaveDates)];
+            const primaryLeaveType = leaveTypeSummary.find(t => t !== 'OD') || leaveTypeSummary[0] || 'Leave';
+            console.log(`[ANALYSIS] LMS Match for ${item.employee_name}: ${totalCount} total, ${unpaidCount} unpaid (excl OD), ${odDates.length} OD dates`);
             leaveData = {
-              ...leaveRes.rows[0],
-              unpaid_leaves: parseFloat(String(leaveRes.rows[0].unpaid_leaves || 0)),
-              total_leaves: parseFloat(String(leaveRes.rows[0].total_leaves || 0))
-            };
+              unpaid_leaves: unpaidCount,
+              total_leaves: totalCount,
+              leave_type: primaryLeaveType,
+              leave_dates: uniqueAllLeaveDates,
+              od_dates: odDates
+            } as any;
           }
         } catch (error) {
           console.error('LMS query failed for employee', item.employee_id, error);
         }
       }
 
+      const calendarDays = new Date(payroll.year, payroll.month, 0).getDate();
       if (timesheetClient) {
         try {
-          const empCode = item.employee_name.includes('REBECA') ? 'E0046' : item.employee_email;
-          console.log(`[ANALYSIS] Fetching TS for ${item.employee_name} using code ${empCode} for ${payroll.month}/${payroll.year}`);
-          const tsRes = await timesheetClient.query(
-            `SELECT count(DISTINCT CAST(date as date)) as days_worked 
-             FROM time_entries 
-             WHERE UPPER(employee_code) = UPPER($1) AND EXTRACT(MONTH FROM CAST(date as date)) = $2 AND EXTRACT(YEAR FROM CAST(date as date)) = $3`,
-            [empCode, payroll.month, payroll.year]
-          );
-          if (tsRes.rows.length > 0 && tsRes.rows[0].days_worked > 0) {
-            const worked = parseInt(tsRes.rows[0].days_worked);
-            console.log(`[ANALYSIS] ✅ Found ${worked} days for ${item.employee_name}`);
-            
-            const calendarDays = new Date(payroll.year, payroll.month, 0).getDate();
-            let sundays = 0;
-            let curr = new Date(payroll.year, payroll.month - 1, 1);
-            const end = new Date(payroll.year, payroll.month, 0);
-            while (curr <= end) {
-              if (curr.getDay() === 0) sundays++;
-              curr.setDate(curr.getDate() + 1);
+          // Build an employee-code map from TimeStrap so email/name resolution is robust.
+          const tsCodeMap = new Map<string, string>();
+          const tsNameMap = new Map<string, string>();
+          const tsEmpRes = await timesheetClient.query('SELECT name, email, employee_code FROM employees');
+          tsEmpRes.rows.forEach((r: any) => {
+            if (r.employee_code) {
+              const code = r.employee_code.toUpperCase();
+              if (r.email) tsCodeMap.set(r.email.toLowerCase(), code);
+              if (r.name) tsNameMap.set(r.name.toLowerCase().trim(), code);
             }
+          });
 
-            tsData = {
-              missing_days: Math.max(0, calendarDays - worked - holidayCount - sundays),
-              submitted_at: new Date().toISOString()
-            };
+          const emailKey = (item.employee_email || '').toLowerCase();
+          const nameKey = (item.employee_name || '').toLowerCase().trim();
+          const explicitCode = (item as any).employee_code || null;
+          const resolvedTsCode = tsCodeMap.get(emailKey) || tsNameMap.get(nameKey) || null;
+
+          const candidateCodes = new Set<string>();
+          if (explicitCode) candidateCodes.add(explicitCode.toUpperCase());
+          if (resolvedTsCode) candidateCodes.add(resolvedTsCode.toUpperCase());
+          if (item.employee_email) candidateCodes.add(item.employee_email.toUpperCase());
+          if (item.employee_name) candidateCodes.add(item.employee_name.toUpperCase().trim());
+
+          const lookupCodes = Array.from(candidateCodes).filter(Boolean);
+          console.log(`[ANALYSIS] Fetching TS for ${item.employee_name} using codes ${JSON.stringify(lookupCodes)} for ${payroll.month}/${payroll.year}`);
+
+          const missingDates: string[] = [];
+
+          if (lookupCodes.length === 0) {
+            console.warn(`[ANALYSIS] No TS lookup codes found for ${item.employee_name}; treating as no timesheet submitted.`);
+            for (let d = 1; d <= calendarDays; d++) {
+              const dt = new Date(payroll.year, payroll.month - 1, d);
+              const dstr = dt.toISOString().split('T')[0];
+              if (dt.getDay() === 0) continue;
+              if (holidaySet.has(dstr)) continue;
+              missingDates.push(dstr);
+            }
+            tsData = { missing_days: missingDates.length, missing_dates: missingDates, submitted_at: null };
           } else {
-            console.log(`[ANALYSIS] ❌ No days found for ${item.employee_name} with code ${empCode}`);
+            const tsRes = await timesheetClient.query(
+              `SELECT DISTINCT CAST(date AS date) AS d
+               FROM time_entries
+               WHERE UPPER(employee_code) = ANY($1) AND EXTRACT(MONTH FROM CAST(date as date)) = $2 AND EXTRACT(YEAR FROM CAST(date as date)) = $3`,
+              [lookupCodes, payroll.month, payroll.year]
+            );
+
+            if (tsRes.rows.length > 0) {
+              const workedDatesSet = new Set(tsRes.rows.map((r: any) => new Date(r.d).toISOString().split('T')[0]));
+              for (let d = 1; d <= calendarDays; d++) {
+                const dt = new Date(payroll.year, payroll.month - 1, d);
+                const dstr = dt.toISOString().split('T')[0];
+                if (dt.getDay() === 0) continue;
+                if (holidaySet.has(dstr)) continue;
+                if (!workedDatesSet.has(dstr)) missingDates.push(dstr);
+              }
+
+              console.log(`[ANALYSIS] ✅ Found ${tsRes.rows.length} worked days for ${item.employee_name}, missing ${missingDates.length}`);
+              tsData = {
+                missing_days: missingDates.length,
+                missing_dates: missingDates,
+                submitted_at: new Date().toISOString()
+              };
+            } else {
+              console.log(`[ANALYSIS] ❌ No days found for ${item.employee_name} with lookup codes ${JSON.stringify(lookupCodes)}`);
+              for (let d = 1; d <= calendarDays; d++) {
+                const dt = new Date(payroll.year, payroll.month - 1, d);
+                const dstr = dt.toISOString().split('T')[0];
+                if (dt.getDay() === 0) continue;
+                if (holidaySet.has(dstr)) continue;
+                missingDates.push(dstr);
+              }
+              tsData = { missing_days: missingDates.length, missing_dates: missingDates, submitted_at: null };
+            }
           }
         } catch (error) {
           console.error('[ANALYSIS] Timesheet query failed for employee', item.employee_id, error);
         }
       }
+
+      const missingDays = tsData?.missing_days ?? item.missing_timesheets ?? 0;
+      const missingDatesArray = tsData?.missing_dates ?? [];
+      const leaveDatesArray = leaveData?.leave_dates ?? [];
+      const leaveDateSet = new Set(leaveDatesArray);
+
+      // Filter out missing dates that fall on approved leave dates
+      const actualMissingDates = missingDatesArray.filter(d => !leaveDateSet.has(d));
+      const excludedDatesComputed = missingDatesArray.filter(d => leaveDateSet.has(d));
+      
+      // Prefer stored excluded dates if they exist, otherwise use computed ones
+      const finalExcludedDates = storedExcludedDates.length > 0 ? storedExcludedDates : excludedDatesComputed;
+      const finalHolidayDates = storedHolidayDates.length > 0 ? storedHolidayDates : holidayDatesAll;
+      
+      const leaveMatchedTsDays = finalExcludedDates.length;
+      const actualMissingTsDays = actualMissingDates.length;
+
+      const timesheetDeduction = Math.round(
+        ((monthlySalary || 0) / (calendarDays || 30)) * actualMissingTsDays * 100
+      ) / 100;
+
+      const leaveDeduction = Number(item.leave_deduction) || 0;
+      const pfDeduction = Number(item.pf_deduction) || 0;
+      const esiDeduction = Number(item.esi_deduction) || 0;
+      const taxDeduction = Number(item.tax_deduction) || 0;
+      const loanDeduction = Number(item.loan_deduction) || 0;
+      const advanceDeduction = Number(item.advance_deduction) || 0;
+      const bonus = Number(item.bonus) || 0;
+      const sundayEarnings = Math.round(((monthlySalary || 0) / (calendarDays || 30)) * (Number(item.sunday_work_days) || 0) * 100) / 100;
+      const netSalary = Math.max(
+        0,
+        Math.round((monthlySalary - leaveDeduction - timesheetDeduction - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction + bonus + sundayEarnings) * 100) / 100
+      );
 
       enriched.push({
         ...item,
@@ -1277,10 +1458,21 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
           uan_number: item.employee_uan_number,
         },
         unpaid_leaves: leaveData?.unpaid_leaves ?? item.unpaid_leaves,
-        leave_source: leaveData ? `LMS (${leaveData.leave_type})` : 'No LMS leave record',
-        missing_timesheets: tsData?.missing_days ?? item.missing_timesheets,
-        timesheet_status: tsData ? 'Submitted' : 'Not submitted',
+        leave_source: leaveData ? `LMS (${(leaveData as any).leave_type})` : 'No LMS leave record',
+        leave_type: (leaveData as any)?.leave_type ?? null,
+        od_dates: (leaveData as any)?.od_dates ?? [],
+        leave_matched_ts_dates: leaveData?.leave_dates ?? [],
+        missing_timesheets: actualMissingTsDays,
+        missing_dates: actualMissingDates,
+        leave_matched_ts_days: leaveMatchedTsDays,
+        timesheet_deduction: timesheetDeduction,
+        net_salary: netSalary,
+        timesheet_status: tsData?.submitted_at ? 'Submitted' : 'Not submitted',
         timesheet_submitted_at: tsData?.submitted_at || null,
+        timesheet_excluded_dates: finalExcludedDates,
+        holiday_dates: finalHolidayDates,
+        leave_dates: leaveDatesArray,
+        missing_dates: actualMissingDates,
       });
     }
 
@@ -1298,8 +1490,17 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
 
 router.patch('/payroll-items/:id', async (req, res) => {
   const { id } = req.params;
-  // advance_deduction is intentionally excluded — it is auto-set from Advance Management only
-  const { sunday_work_days, bonus } = req.body;
+  const { 
+    sunday_work_days, 
+    bonus,
+    unpaid_leaves,
+    leave_deduction,
+    missing_timesheets,
+    timesheet_deduction,
+    timesheet_excluded_dates,
+    holiday_dates,
+    advance_deduction
+  } = req.body;
 
   let client;
   try {
@@ -1316,10 +1517,17 @@ router.patch('/payroll-items/:id', async (req, res) => {
     const item = currentRes.rows[0];
     if (!item) return res.status(404).json({ error: 'Item not found' });
 
-    // Advance is always taken from the stored value — never from request body
-    const storedAdvance = parseFloat(item.advance_deduction || 0);
+    // Take new advance from req.body if provided (for refresh), otherwise fallback to stored
+    const storedAdvance = advance_deduction !== undefined ? parseFloat(advance_deduction) : parseFloat(item.advance_deduction || 0);
     const newSundayWork = sunday_work_days !== undefined ? parseFloat(sunday_work_days) : parseFloat(item.sunday_work_days || 0);
     const newBonus = bonus !== undefined ? parseFloat(bonus) : parseFloat(item.bonus || 0);
+
+    const newUnpaidLeaves = unpaid_leaves !== undefined ? parseFloat(unpaid_leaves) : parseFloat(item.unpaid_leaves || 0);
+    const newMissingTimesheets = missing_timesheets !== undefined ? parseInt(missing_timesheets) : parseInt(item.missing_timesheets || 0);
+    
+    // Support JSON arrays for dates
+    const newExcludedDates = timesheet_excluded_dates !== undefined ? JSON.stringify(timesheet_excluded_dates) : item.timesheet_excluded_dates;
+    const newHolidayDates = holiday_dates !== undefined ? JSON.stringify(holiday_dates) : item.holiday_dates;
 
     const monthlySalary = parseFloat(item.monthly_salary);
 
@@ -1327,8 +1535,8 @@ router.patch('/payroll-items/:id', async (req, res) => {
     const calendarDays = new Date(parseInt(item.year), parseInt(item.month), 0).getDate();
     const dayRate = monthlySalary / calendarDays;
 
-    const leaveDeduction = parseFloat(item.leave_deduction);
-    const tsDeduction = parseFloat(item.timesheet_deduction);
+    const finalLeaveDeduction = leave_deduction !== undefined ? parseFloat(leave_deduction) : parseFloat(item.leave_deduction);
+    const tsDeduction = timesheet_deduction !== undefined ? parseFloat(timesheet_deduction) : parseFloat(item.timesheet_deduction);
     const pfDeduction = parseFloat(item.pf_deduction);
     const esiDeduction = parseFloat(item.esi_deduction);
     const taxDeduction = parseFloat(item.tax_deduction);
@@ -1336,16 +1544,35 @@ router.patch('/payroll-items/:id', async (req, res) => {
 
     const sundayEarnings = Math.round(dayRate * newSundayWork * 100) / 100;
 
-    const totalDeductions = leaveDeduction + tsDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + storedAdvance;
+    const totalDeductions = finalLeaveDeduction + tsDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + storedAdvance;
     const netSalary = Math.max(0, Math.round((monthlySalary - totalDeductions + newBonus + sundayEarnings) * 100) / 100);
 
     const updateRes = await client.query(
       `UPDATE payroll_items SET 
         sunday_work_days = $1, 
         bonus = $2, 
-        net_salary = $3
-       WHERE id = $4 RETURNING *`,
-      [newSundayWork, newBonus, netSalary, id]
+        net_salary = $3,
+        unpaid_leaves = $4,
+        leave_deduction = $5,
+        missing_timesheets = $6,
+        timesheet_deduction = $7,
+        timesheet_excluded_dates = $8,
+        holiday_dates = $9,
+        advance_deduction = $10
+       WHERE id = $11 RETURNING *`,
+      [
+        newSundayWork, 
+        newBonus, 
+        netSalary, 
+        newUnpaidLeaves, 
+        finalLeaveDeduction, 
+        newMissingTimesheets, 
+        tsDeduction, 
+        newExcludedDates, 
+        newHolidayDates, 
+        storedAdvance,
+        id
+      ]
     );
 
     res.json(updateRes.rows[0]);
@@ -1636,6 +1863,58 @@ router.post('/advances', async (req, res) => {
   }
 });
 
+router.put('/advances/:id', async (req, res) => {
+  const { id } = req.params;
+  const { amount, date, reason, repayment_type, installment_amount, remarks } = req.body;
+  let client;
+  try {
+    client = await payrollPool.connect();
+    // Re-calculate balance if amount changes (simple calculation assuming no deductions have been made yet, or preserving recovered amount difference)
+    const currentRes = await client.query('SELECT amount, balance FROM advances WHERE id = $1', [id]);
+    if (currentRes.rows.length === 0) return res.status(404).json({ error: 'Advance not found' });
+    const current = currentRes.rows[0];
+    const recovered = Number(current.amount) - Number(current.balance);
+    const newAmount = parseFloat(amount.toString()) || 0;
+    const newBalance = Math.max(0, newAmount - recovered);
+
+    const result = await client.query(`
+      UPDATE advances
+      SET amount = $1, date = $2, reason = $3, repayment_type = $4, installment_amount = $5, balance = $6, remarks = $7
+      WHERE id = $8
+      RETURNING *
+    `, [
+      newAmount,
+      date,
+      reason,
+      repayment_type,
+      parseFloat((installment_amount || '0').toString()) || 0,
+      newBalance,
+      remarks,
+      id
+    ]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error updating advance:', err);
+    res.status(500).json({ error: 'Failed to update advance' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+router.delete('/advances/:id', async (req, res) => {
+  const { id } = req.params;
+  let client;
+  try {
+    client = await payrollPool.connect();
+    await client.query('DELETE FROM advances WHERE id = $1', [id]);
+    res.status(204).send();
+  } catch (err) {
+    console.error('Error deleting advance:', err);
+    res.status(500).json({ error: 'Failed to delete advance' });
+  } finally {
+    if (client) client.release();
+  }
+});
 // GET /api/employee-monthly-report?employeeId=X&month=M&year=Y
 router.get('/employee-monthly-report', async (req, res) => {
   const { employeeId, month, year } = req.query;
@@ -1698,11 +1977,16 @@ router.get('/employee-monthly-report', async (req, res) => {
     let tsMap = new Map();
     if (timesheetPool) {
       timesheetClient = await timesheetPool.connect();
+      const candidateCodes = new Set<string>();
+      if (code) candidateCodes.add(code);
+      if (emailKey) candidateCodes.add(emailKey.toUpperCase());
+      if (employee.name) candidateCodes.add(employee.name.toUpperCase().trim());
+      const lookupCodes = Array.from(candidateCodes).filter(Boolean);
       const tsRes = await timesheetClient.query(
         `SELECT date, total_hours
          FROM time_entries
-         WHERE UPPER(employee_code) = $1 AND date >= $2 AND date <= $3`,
-        [code || emailKey.toUpperCase(), startDate.toISOString(), endDate.toISOString()]
+         WHERE UPPER(employee_code) = ANY($1) AND date >= $2 AND date <= $3`,
+        [lookupCodes, startDate.toISOString(), endDate.toISOString()]
       );
       tsRes.rows.forEach((r: any) => {
         const dStr = formatDate(r.date);

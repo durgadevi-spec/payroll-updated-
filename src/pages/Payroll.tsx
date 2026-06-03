@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Calculator, Play, ChevronDown, ChevronUp, CheckCircle2, DollarSign, AlertTriangle, Trash2, Eye, Edit2 } from 'lucide-react';
+import { Calculator, Play, ChevronDown, ChevronUp, CheckCircle2, DollarSign, AlertTriangle, Trash2, Eye, Edit2, FileSpreadsheet, Info, X, RefreshCw } from 'lucide-react';
 import { Payroll as PayrollType, PayrollItem, Employee, Leave, Timesheet } from '../types';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
@@ -15,6 +15,51 @@ interface PayrollItemWithEmployee extends PayrollItem {
   employee: Employee;
 }
 
+const getItemDaysForRate = (item: PayrollItemWithEmployee) => {
+  const calculationDays = Number(item.calculation_days || 0);
+  const workingDays = Number(item.working_days || 0);
+  if (calculationDays > 0) return calculationDays;
+  if (workingDays > 0) return workingDays;
+  return 30;
+};
+
+const safeNumber = (value: any, fallback = 0) => {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : fallback;
+};
+
+const getTimesheetDeduction = (item: PayrollItemWithEmployee) => {
+  const missingDays = safeNumber(item.missing_timesheets, 0);
+  const storedDeduction = safeNumber(item.timesheet_deduction, 0);
+
+  if (missingDays === 0) {
+    return storedDeduction;
+  }
+
+  if (storedDeduction > 0) {
+    return storedDeduction;
+  }
+
+  const days = getItemDaysForRate(item);
+  const perDaySalary = days > 0 ? safeNumber(item.monthly_salary, 0) / days : 0;
+  return Math.round(perDaySalary * missingDays * 100) / 100;
+};
+
+const getNetSalary = (item: PayrollItemWithEmployee) => {
+  const monthlySalary = safeNumber(item.monthly_salary, 0);
+  const leaveDeduction = safeNumber(item.leave_deduction, 0);
+  const tsDeduction = getTimesheetDeduction(item);
+  const pfDeduction = safeNumber(item.pf_deduction, 0);
+  const esiDeduction = safeNumber(item.esi_deduction, 0);
+  const taxDeduction = safeNumber(item.tax_deduction, 0);
+  const loanDeduction = safeNumber(item.loan_deduction, 0);
+  const advanceDeduction = safeNumber(item.advance_deduction, 0);
+  const bonus = safeNumber(item.bonus, 0);
+  const sundayEarnings = (monthlySalary / getItemDaysForRate(item)) * safeNumber(item.sunday_work_days, 0);
+
+  return Math.max(0, Math.round((monthlySalary - leaveDeduction - tsDeduction - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction + bonus + sundayEarnings) * 100) / 100);
+};
+
 export function Payroll() {
   const { showToast } = useToast();
   const [payrolls, setPayrolls] = useState<PayrollType[]>([]);
@@ -25,6 +70,8 @@ export function Payroll() {
   const [loadingItems, setLoadingItems] = useState(false);
   const [analysisPayroll, setAnalysisPayroll] = useState<PayrollType | null>(null);
   const [analysisItems, setAnalysisItems] = useState<(PayrollItemWithEmployee & { leave_source?: string; timesheet_status?: string; timesheet_submitted_at?: string | null })[]>([]);
+  const [missingDatesModal, setMissingDatesModal] = useState<{ name: string; dates: string[] } | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [showGenerateModal, setShowGenerateModal] = useState(false);
   const { month: currentMonth, year: currentYear } = getCurrentMonth();
@@ -137,6 +184,68 @@ export function Payroll() {
     }
   }
 
+  async function handleRefreshPayroll() {
+    if (!analysisPayroll) return;
+    setRefreshing(true);
+    try {
+      // 1. Fetch updated external data by calling the analysis route (which calculates everything live)
+      const res = await fetch(`/api/payroll-items/analysis/${analysisPayroll.id}`);
+      if (!res.ok) throw new Error('Failed to fetch updated analysis');
+      const latestData: any[] = await res.json();
+      
+      // Fetch approved advances for the payroll month from Advance Management
+      const { data: advancesData } = await supabase
+        .from('advances')
+        .select('employee_id, installment_amount, balance, status, repayment_type')
+        .eq('status', 'Active')
+        .gt('balance', 0);
+      
+      const advanceByEmp = new Map<string, number>();
+      (advancesData || []).forEach((adv: any) => {
+        const inst = parseFloat(adv.installment_amount || 0);
+        const bal = parseFloat(adv.balance || 0);
+        const deduction = (adv.repayment_type === 'One-time' || inst === 0) ? bal : Math.min(inst, bal);
+        if (deduction > 0) {
+          advanceByEmp.set(adv.employee_id, (advanceByEmp.get(adv.employee_id) || 0) + deduction);
+        }
+      });
+      
+      // 2. Loop through all items and update them with the recalculated attendance/leave data
+      await Promise.all(latestData.map(async (item) => {
+        // Calculate leave deduction locally for patch since item.leave_deduction in analysis is the old stored one
+        const monthlySalary = Number(item.monthly_salary) || 0;
+        const calendarDays = new Date(Number(analysisPayroll.year), Number(analysisPayroll.month), 0).getDate();
+        const rate = monthlySalary / (item.working_days || calendarDays);
+        
+        const recalculatedLeaveDed = Math.round(rate * Number(item.unpaid_leaves) * 100) / 100;
+
+        const patchPayload = {
+          unpaid_leaves: item.unpaid_leaves,
+          leave_deduction: recalculatedLeaveDed,
+          missing_timesheets: item.missing_timesheets,
+          timesheet_deduction: item.timesheet_deduction,
+          timesheet_excluded_dates: item.timesheet_excluded_dates,
+          holiday_dates: item.holiday_dates,
+          advance_deduction: advanceByEmp.get(item.employee_id) || 0,
+        };
+        
+        await fetch(`/api/payroll-items/${item.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patchPayload)
+        });
+      }));
+
+      showToast('success', 'Payroll external data refreshed successfully');
+      await loadPayrolls();
+      await loadPayrollAnalysis(analysisPayroll);
+    } catch (error) {
+      console.error(error);
+      showToast('error', 'Failed to refresh payroll data');
+    }
+    setRefreshing(false);
+  }
+
   async function generatePayroll() {
     // Allow multiple payrolls for the same month/year to support individual employee runs
 
@@ -211,8 +320,12 @@ export function Payroll() {
         const leaveData = leaveMap.get(emp.id);
         const tsData = timesheetMap.get(emp.id);
         const unpaidLeaves = leaveData?.unpaid_leaves || 0;
+        const paSlaConsumed = leaveData?.pa_sla_consumed || 0;
+        const leaveDates: string[] = (leaveData as any)?.leave_dates || [];
         // Default to 0 missing days — absence of TS data does NOT mean full month missing
         const missingTimesheets = tsData?.missing_days ?? 0;
+        const excludedDates: string[] = (tsData as any)?.excluded_dates || [];
+        const holidayDates: string[] = (tsData as any)?.holiday_dates || [];
         const advanceDeduction = advanceByEmp.get(emp.id) || 0;
 
         const monthlySalary = emp.ctc / 12;
@@ -261,6 +374,9 @@ export function Payroll() {
           unpaid_leaves: unpaidLeaves,
           missing_timesheets: missingTimesheets,
           holiday_count: holidayCount,
+          pa_sla_consumed: paSlaConsumed,
+          timesheet_excluded_dates: excludedDates,
+          holiday_dates: holidayDates,
           working_days: calculationType === 'working_days' ? effectiveWorkingDays : calendarDays,
           calculation_type: calculationType,
           calculation_days: calculationType === 'custom' ? parseFloat(customDaysInput) || 0 : (calculationType === 'working_days' ? effectiveWorkingDays : calendarDays),
@@ -315,42 +431,57 @@ export function Payroll() {
       // 2. Fetch payroll items to find advance deductions
       const { data: items } = await supabase
         .from('payroll_items')
-        .select('employee_id, advance_deduction')
-        .eq('payroll_id', payroll.id)
-        .gt('advance_deduction', 0);
+        .select('employee_id, advance_deduction, pa_sla_consumed')
+        .eq('payroll_id', payroll.id);
       
       if (items && items.length > 0) {
         for (const item of items) {
-          // Find active advances for this employee (oldest first)
-          const { data: activeAdvances } = await supabase
-            .from('advances')
-            .select('*')
-            .eq('employee_id', item.employee_id)
-            .eq('status', 'Active')
-            .gt('balance', 0)
-            .order('created_at', { ascending: true });
+          // 1. Advance Deductions
+          if (item.advance_deduction && item.advance_deduction > 0) {
+            const { data: activeAdvances } = await supabase
+              .from('advances')
+              .select('*')
+              .eq('employee_id', item.employee_id)
+              .eq('status', 'Active')
+              .gt('balance', 0)
+              .order('created_at', { ascending: true });
 
-          if (activeAdvances && activeAdvances.length > 0) {
-            let remainingDeduction = item.advance_deduction;
-            for (const adv of activeAdvances) {
-              if (remainingDeduction <= 0) break;
-              
-              const deductionToApply = Math.min(adv.balance, remainingDeduction);
-              const newBalance = Math.max(0, adv.balance - deductionToApply);
-              const newStatus = newBalance <= 0 ? 'Closed' : 'Active';
+            if (activeAdvances && activeAdvances.length > 0) {
+              let remainingDeduction = item.advance_deduction;
+              for (const adv of activeAdvances) {
+                if (remainingDeduction <= 0) break;
+                
+                const deductionToApply = Math.min(adv.balance, remainingDeduction);
+                const newBalance = Math.max(0, adv.balance - deductionToApply);
+                const newStatus = newBalance <= 0 ? 'Closed' : 'Active';
 
-              await supabase.from('advances').update({ 
-                balance: newBalance,
-                status: newStatus 
-              }).eq('id', adv.id);
+                await supabase.from('advances').update({ 
+                  balance: newBalance,
+                  status: newStatus 
+                }).eq('id', adv.id);
 
-              remainingDeduction -= deductionToApply;
+                remainingDeduction -= deductionToApply;
+              }
+            }
+          }
+
+          // 2. PA/SLA Deduction
+          if (item.pa_sla_consumed && item.pa_sla_consumed > 0) {
+            const { data: empData } = await supabase
+              .from('employees')
+              .select('pa_sla_balance')
+              .eq('id', item.employee_id)
+              .single();
+            if (empData) {
+              const currentBalance = Number(empData.pa_sla_balance) || 0;
+              const newBalance = Math.max(0, currentBalance - item.pa_sla_consumed);
+              await supabase.from('employees').update({ pa_sla_balance: newBalance }).eq('id', item.employee_id);
             }
           }
         }
       }
 
-      showToast('success', `Payroll marked as paid and advance balances reduced`);
+      showToast('success', `Payroll marked as paid, advance & leave balances updated`);
     } catch (err) {
       console.error('Error marking payroll as paid:', err);
       showToast('error', 'Failed to update advance balances');
@@ -361,6 +492,29 @@ export function Payroll() {
   async function deletePayroll(payroll: PayrollType) {
     const confirmed = window.confirm(`Delete payroll for ${getMonthName(payroll.month)} ${payroll.year}? This will remove associated payroll items and payslips.`);
     if (!confirmed) return;
+
+    if (payroll.status === 'paid') {
+      const { data: items } = await supabase
+        .from('payroll_items')
+        .select('employee_id, pa_sla_consumed')
+        .eq('payroll_id', payroll.id)
+        .gt('pa_sla_consumed', 0);
+      
+      if (items && items.length > 0) {
+        for (const item of items) {
+          const { data: empData } = await supabase
+            .from('employees')
+            .select('pa_sla_balance')
+            .eq('id', item.employee_id)
+            .single();
+          if (empData) {
+            const currentBalance = Number(empData.pa_sla_balance) || 0;
+            const newBalance = currentBalance + item.pa_sla_consumed;
+            await supabase.from('employees').update({ pa_sla_balance: newBalance }).eq('id', item.employee_id);
+          }
+        }
+      }
+    }
 
     await supabase.from('payslips').delete().eq('payroll_id', payroll.id);
     await supabase.from('payroll_items').delete().eq('payroll_id', payroll.id);
@@ -377,6 +531,80 @@ export function Payroll() {
 
     showToast('success', 'Payroll deleted');
     await loadPayrolls();
+  }
+
+  async function downloadPayrollExcel(payroll: PayrollType) {
+    try {
+      const response = await fetch(`/api/payroll-items/analysis/${payroll.id}`);
+      if (!response.ok) throw new Error('Failed to fetch payroll items');
+      const items = await response.json();
+
+      const headers = [
+        'Employee Name',
+        'Employee Code',
+        'CTC',
+        'Monthly Salary',
+        'Leave Taken (days)',
+        'Leave Deduction',
+        'Missing Timesheets (days)',
+        'Timesheet Deduction',
+        'Holidays',
+        'Advance Deduction',
+        'Sunday/OD Work (days)',
+        'PF Deduction',
+        'ESI Deduction',
+        'Tax Deduction',
+        'Bonus',
+        'Net Salary'
+      ];
+
+      const escapeCell = (v: any) => {
+        if (v === null || v === undefined) return '';
+        const s = String(v);
+        if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+          return '"' + s.replace(/"/g, '""') + '"';
+        }
+        return s;
+      };
+
+      const rows = items.map((item: any) => [
+        item.employee?.name || '',
+        item.employee?.employee_code || '',
+        (item.employee?.ctc || 0),
+        (item.monthly_salary || 0),
+        (item.unpaid_leaves || 0),
+        (item.leave_deduction || 0),
+        (item.missing_timesheets || 0),
+        (item.timesheet_deduction || 0),
+        (item.holiday_count || 0),
+        (item.advance_deduction || 0),
+        (item.sunday_work_days || 0),
+        (item.pf_deduction || 0),
+        (item.esi_deduction || 0),
+        (item.tax_deduction || 0),
+        (item.bonus || 0),
+        (item.net_salary || 0)
+      ] as any[]);
+
+      const csvLines = [headers.map(escapeCell).join(',')];
+      for (const r of rows) {
+        csvLines.push(r.map(escapeCell).join(','));
+      }
+
+      const csv = csvLines.join('\r\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Payroll_${getMonthName(payroll.month)}_${payroll.year}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Export failed', err);
+      showToast('error', 'Failed to download payroll');
+    }
   }
 
   const statusVariant = (s: string) => {
@@ -475,6 +703,13 @@ export function Payroll() {
                             </Button>
                           )}
                           <button
+                            onClick={() => downloadPayrollExcel(payroll)}
+                            className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-900/30 transition-colors"
+                            title="Download Excel"
+                          >
+                            <FileSpreadsheet size={16} />
+                          </button>
+                          <button
                             onClick={() => deletePayroll(payroll)}
                             className="p-1.5 text-slate-400 hover:text-red-600 dark:hover:text-red-400 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors"
                             title="Delete payroll"
@@ -535,8 +770,14 @@ export function Payroll() {
         title={analysisPayroll ? `Payroll analysis for ${getMonthName(analysisPayroll.month)} ${analysisPayroll.year}` : 'Payroll analysis'}
         size="lg"
         footer={
-          <div className="flex justify-end gap-3">
-            <Button variant="outline" onClick={() => setAnalysisPayroll(null)}>Close</Button>
+          <div className="flex justify-between items-center w-full">
+            <Button variant="outline" onClick={handleRefreshPayroll} disabled={refreshing} className="gap-2 text-indigo-600 border-indigo-200 hover:bg-indigo-50">
+              <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />
+              {refreshing ? 'Refreshing...' : 'Refresh External Data'}
+            </Button>
+            <div className="flex gap-3">
+              <Button variant="outline" onClick={() => setAnalysisPayroll(null)}>Close</Button>
+            </div>
           </div>
         }
       >
@@ -549,7 +790,7 @@ export function Payroll() {
               <table className="w-full text-xs">
                 <thead>
                   <tr className="bg-slate-100 dark:bg-slate-700/50 border-b border-slate-200 dark:border-slate-700">
-                    {['Employee', 'Leave Taken', 'Leave Source', 'Timesheet Status', 'Missing TS', 'Holidays', 'Advance', 'Sunday Work', 'Net Salary', 'Actions'].map(h => (
+                    {['Employee', 'Leave Taken', 'Leave Source', 'Timesheet Status', 'Missing TS', 'TS Detection', 'Holidays', 'Advance', 'Sunday Work', 'Net Salary', 'Actions'].map(h => (
                       <th key={h} className="py-2 px-3 text-left font-semibold text-slate-600 dark:text-slate-300 whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
@@ -561,7 +802,16 @@ export function Payroll() {
                       <td className="py-2 px-3 text-slate-600 dark:text-slate-300">{item.unpaid_leaves} day{item.unpaid_leaves === 1 ? '' : 's'}</td>
                       <td className="py-2 px-3 text-slate-500 dark:text-slate-400">{item.leave_source || 'N/A'}</td>
                       <td className="py-2 px-3 text-slate-500 dark:text-slate-400">{item.timesheet_status || 'Unknown'}</td>
-                      <td className="py-2 px-3 text-slate-600 dark:text-slate-300">{item.missing_timesheets} day{item.missing_timesheets === 1 ? '' : 's'}</td>
+                      <td className="py-2 px-3 text-slate-600 dark:text-slate-300">
+                        <button
+                          onClick={() => setMissingDatesModal({ name: item.employee?.name || 'Employee', dates: (item as any).missing_dates || [] })}
+                          className="text-left underline text-slate-600 dark:text-slate-300"
+                          title="View missing timesheet dates"
+                        >
+                          {item.missing_timesheets} day{item.missing_timesheets === 1 ? '' : 's'}
+                        </button>
+                      </td>
+                      <td className="py-2 px-3 text-red-500 font-medium">-{formatCurrency(getTimesheetDeduction(item))}</td>
                       <td className="py-2 px-3">
                         <Badge variant="info" dot>{item.holiday_count || 0} holidays</Badge>
                       </td>
@@ -589,6 +839,30 @@ export function Payroll() {
             </div>
           </div>
         )}
+      </Modal>
+
+      <Modal
+        isOpen={!!missingDatesModal}
+        onClose={() => setMissingDatesModal(null)}
+        title={missingDatesModal ? `${missingDatesModal.name} — Missing Timesheet Dates` : 'Missing Dates'}
+        size="sm"
+        footer={
+          <div className="flex justify-end">
+            <Button variant="outline" onClick={() => setMissingDatesModal(null)}>Close</Button>
+          </div>
+        }
+      >
+        <div className="py-2">
+          {missingDatesModal && missingDatesModal.dates.length > 0 ? (
+            <ul className="list-disc list-inside text-sm">
+              {missingDatesModal.dates.map(d => (
+                <li key={d} className="py-1">{new Date(d).toLocaleDateString('en-IN')}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-slate-500">No missing dates recorded.</p>
+          )}
+        </div>
       </Modal>
 
       <Modal
@@ -721,11 +995,29 @@ export function Payroll() {
 }
 
 function PayrollBreakdown({ items, loading, onEdit }: { items: PayrollItemWithEmployee[]; loading: boolean; onEdit?: (item: any) => void }) {
+  const [showDetails, setShowDetails] = useState(false);
+  const [expandedItemId, setExpandedItemId] = useState<string | null>(null);
+
   if (loading) return <div className="p-3"><TableSkeleton rows={2} cols={8} /></div>;
+
+  const fmt = (d: string) => new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
 
   return (
     <div>
-      <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">Salary Breakdown</p>
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Salary Breakdown</p>
+        <button
+          onClick={() => setShowDetails(v => !v)}
+          className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border font-medium transition-colors ${
+            showDetails
+              ? 'bg-indigo-600 text-white border-indigo-600'
+              : 'bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 border-indigo-300 dark:border-indigo-700 hover:bg-indigo-50 dark:hover:bg-indigo-900/30'
+          }`}
+        >
+          <Info size={12} />
+          {showDetails ? 'Hide Date Details' : 'Show Excluded Dates'}
+        </button>
+      </div>
       <div className="mb-4 text-xs text-slate-500 dark:text-slate-400">
         Leave taken and missing or unsubmitted timesheets are deducted from the employee salary in the payroll calculation.
       </div>
@@ -739,48 +1031,146 @@ function PayrollBreakdown({ items, loading, onEdit }: { items: PayrollItemWithEm
             </tr>
           </thead>
           <tbody>
-            {items.map(item => (
-              <tr key={item.id} className="border-b border-slate-50 dark:border-slate-700/30 hover:bg-slate-50/50 dark:hover:bg-slate-700/20 transition-colors">
-                <td className="py-2 px-3">
-                  <div className="font-medium text-slate-700 dark:text-slate-200">{item.employee?.name}</div>
-                  <div className="text-[10px] text-slate-400">CTC: {formatCurrency(item.employee?.ctc || 0)}</div>
-                </td>
-                <td className="py-2 px-3">
-                  <Badge variant={item.calculation_type === 'monthly' ? 'neutral' : 'info'} size="sm" className="capitalize">
-                    {item.calculation_type || 'monthly'}
-                  </Badge>
-                </td>
-                <td className="py-2 px-3 text-slate-600 dark:text-slate-300 font-medium">
-                  {item.calculation_days || (item.working_days || 26)}d
-                </td>
-                <td className="py-2 px-3 text-slate-600 dark:text-slate-300">{formatCurrency(item.monthly_salary)}</td>
-                <td className="py-2 px-3 text-slate-600 dark:text-slate-300">{item.unpaid_leaves} day{item.unpaid_leaves === 1 ? '' : 's'}</td>
-                <td className="py-2 px-3 text-red-500">-{formatCurrency(item.leave_deduction)}</td>
-                <td className="py-2 px-3 text-slate-600 dark:text-slate-300">{item.missing_timesheets} day{item.missing_timesheets === 1 ? '' : 's'}</td>
-                <td className="py-2 px-3 text-red-500">-{formatCurrency(item.timesheet_deduction)}</td>
-                <td className="py-2 px-3">
-                  <Badge variant="info" size="sm">{item.holiday_count || 0}h</Badge>
-                </td>
-                <td className="py-2 px-3 text-red-500">-{formatCurrency(item.advance_deduction || 0)}</td>
-                <td className="py-2 px-3 text-green-500">+{item.sunday_work_days || 0}d</td>
-                <td className="py-2 px-3 text-red-500">-{formatCurrency(item.pf_deduction)}</td>
-                <td className="py-2 px-3 text-red-500">-{formatCurrency(item.esi_deduction)}</td>
-                <td className="py-2 px-3 text-red-500">-{formatCurrency(item.tax_deduction)}</td>
-                <td className="py-2 px-3 text-emerald-600 dark:text-emerald-400">+{formatCurrency(item.bonus)}</td>
-                 <td className="py-2 px-3 font-bold text-slate-800 dark:text-white">{formatCurrency(item.net_salary)}</td>
-                 <td className="py-2 px-3">
-                   {onEdit && (
-                     <button
-                       onClick={() => onEdit(item)}
-                       className="p-1 text-blue-600 hover:bg-blue-50 rounded"
-                       title="Edit adjustments"
-                     >
-                       <Edit2 size={12} />
-                     </button>
-                   )}
-                 </td>
-               </tr>
-            ))}
+            {items.map(item => {
+              const excluded: string[] = (item as any).timesheet_excluded_dates || [];
+              const holidayDates: string[] = (item as any).holiday_dates || [];
+              const leaveDates: string[] = (item as any).leave_dates || [];
+              const odDates: string[] = (item as any).od_dates || [];
+              const finalMissingDates: string[] = (item as any).missing_dates || [];
+              const isOD = (item as any).leave_type === 'OD' || (odDates.length > 0 && item.unpaid_leaves === 0);
+              const isExpanded = expandedItemId === item.id;
+
+              return (
+                <React.Fragment key={item.id}>
+                  <tr className="border-b border-slate-50 dark:border-slate-700/30 hover:bg-slate-50/50 dark:hover:bg-slate-700/20 transition-colors">
+                    <td className="py-2 px-3">
+                      <div className="font-medium text-slate-700 dark:text-slate-200">{item.employee?.name}</div>
+                      <div className="text-[10px] text-slate-400">CTC: {formatCurrency(item.employee?.ctc || 0)}</div>
+                    </td>
+                    <td className="py-2 px-3">
+                      <Badge variant={item.calculation_type === 'monthly' ? 'neutral' : 'info'} size="sm" className="capitalize">
+                        {item.calculation_type || 'monthly'}
+                      </Badge>
+                    </td>
+                    <td className="py-2 px-3 text-slate-600 dark:text-slate-300 font-medium">
+                      {item.calculation_days || (item.working_days || 26)}d
+                    </td>
+                    <td className="py-2 px-3 text-slate-600 dark:text-slate-300">{formatCurrency(item.monthly_salary)}</td>
+                    <td className="py-2 px-3">
+                      <div>{item.unpaid_leaves} day{item.unpaid_leaves === 1 ? '' : 's'}</div>
+                      {odDates.length > 0 && (
+                        <div className="text-[10px] text-purple-600 dark:text-purple-400 font-medium mt-0.5">
+                          +{odDates.length}d OD (no deduction)
+                        </div>
+                      )}
+                    </td>
+                    <td className="py-2 px-3">
+                      {isOD
+                        ? <span className="text-purple-600 dark:text-purple-400 font-medium">₹0 (OD)</span>
+                        : <span className="text-red-500">-{formatCurrency(item.leave_deduction)}</span>
+                      }
+                    </td>
+                    <td className="py-2 px-3">
+                      <div className="flex items-center gap-1">
+                        <span className="text-slate-600 dark:text-slate-300">{item.missing_timesheets} day{item.missing_timesheets === 1 ? '' : 's'}</span>
+                        {showDetails && (
+                          <button
+                            onClick={() => setExpandedItemId(isExpanded ? null : item.id)}
+                            className={`transition-colors ${excluded.length > 0 ? 'text-amber-500 hover:text-amber-700' : 'text-slate-400 hover:text-slate-600'}`}
+                            title={excluded.length > 0 ? `${excluded.length} date(s) excluded from TS deduction` : 'View date breakdown'}
+                          >
+                            <Info size={11} />
+                          </button>
+                        )}
+                      </div>
+                      {showDetails && excluded.length > 0 && (
+                        <div className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
+                          {excluded.length} excluded ✓
+                        </div>
+                      )}
+                    </td>
+                    <td className="py-2 px-3 text-red-500">-{formatCurrency(getTimesheetDeduction(item))}</td>
+                    <td className="py-2 px-3">
+                      <Badge variant="info" size="sm">{item.holiday_count || 0}d</Badge>
+                    </td>
+                    <td className="py-2 px-3 text-red-500">-{formatCurrency(item.advance_deduction || 0)}</td>
+                    <td className="py-2 px-3 text-green-500">+{item.sunday_work_days || 0}d</td>
+                    <td className="py-2 px-3 text-red-500">-{formatCurrency(item.pf_deduction)}</td>
+                    <td className="py-2 px-3 text-red-500">-{formatCurrency(item.esi_deduction)}</td>
+                    <td className="py-2 px-3 text-red-500">-{formatCurrency(item.tax_deduction)}</td>
+                    <td className="py-2 px-3 text-emerald-600 dark:text-emerald-400">+{formatCurrency(item.bonus)}</td>
+                    <td className="py-2 px-3 font-bold text-slate-800 dark:text-white">{formatCurrency(getNetSalary(item))}</td>
+                    <td className="py-2 px-3">
+                      {onEdit && (
+                        <button
+                          onClick={() => onEdit(item)}
+                          className="p-1 text-blue-600 hover:bg-blue-50 rounded"
+                          title="Edit adjustments"
+                        >
+                          <Edit2 size={12} />
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+
+                  {showDetails && isExpanded && (
+                    <tr className="bg-indigo-50 dark:bg-indigo-900/20">
+                      <td colSpan={17} className="px-4 py-3">
+                        <div className="flex items-center justify-between mb-3">
+                          <p className="text-xs font-semibold text-indigo-700 dark:text-indigo-300">📊 Date Breakdown — {item.employee?.name}</p>
+                          <button onClick={() => setExpandedItemId(null)} className="text-slate-400 hover:text-slate-600"><X size={12} /></button>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-[11px]">
+                          <div className="bg-white dark:bg-slate-800 p-2 rounded border border-slate-200 dark:border-slate-700">
+                            <p className="font-semibold text-slate-600 dark:text-slate-300 mb-1">📅 Approved Leaves ({leaveDates.length} dates)</p>
+                            {leaveDates.length > 0
+                              ? leaveDates.map((d: string) => (
+                                  <div key={d} className="flex items-center gap-1 text-slate-600 dark:text-slate-300">
+                                    <span>{fmt(d)}</span>
+                                    {odDates.includes(d) && <span className="text-[9px] bg-purple-100 text-purple-700 px-1 rounded">OD</span>}
+                                  </div>
+                                ))
+                              : <div className="text-slate-400 italic">None</div>
+                            }
+                          </div>
+                          <div className="bg-white dark:bg-slate-800 p-2 rounded border border-slate-200 dark:border-slate-700">
+                            <p className="font-semibold text-amber-600 dark:text-amber-400 mb-1">🚫 Excluded TS ({excluded.length} dates)</p>
+                            <p className="text-[9px] text-slate-400 mb-1">Leave = Missing TS → no TS deduction</p>
+                            {excluded.length > 0
+                              ? excluded.map(d => <div key={d} className="text-amber-700 dark:text-amber-300">{fmt(d)} ✓</div>)
+                              : <div className="text-slate-400 italic">None</div>
+                            }
+                          </div>
+                          <div className="bg-white dark:bg-slate-800 p-2 rounded border border-slate-200 dark:border-slate-700">
+                            <p className="font-semibold text-blue-600 dark:text-blue-400 mb-1">🏖 Holidays ({holidayDates.length} dates)</p>
+                            {holidayDates.length > 0
+                              ? holidayDates.map(d => <div key={d} className="text-blue-700 dark:text-blue-300">{fmt(d)}</div>)
+                              : <div className="text-slate-400 italic">None / Not applicable</div>
+                            }
+                          </div>
+                          {odDates.length > 0 && (
+                            <div className="bg-purple-50 dark:bg-purple-900/20 p-2 rounded border border-purple-200 dark:border-purple-800">
+                              <p className="font-semibold text-purple-600 dark:text-purple-400 mb-1">🟣 OD Dates ({odDates.length} dates)</p>
+                              <p className="text-[9px] text-slate-400 mb-1">On Duty — no deduction</p>
+                              {odDates.map(d => <div key={d} className="text-purple-700 dark:text-purple-300">{fmt(d)}</div>)}
+                            </div>
+                          )}
+                          <div className="bg-white dark:bg-slate-800 p-2 rounded border border-red-200 dark:border-red-800">
+                            <p className="font-semibold text-red-600 dark:text-red-400 mb-1">⚠ Final TS Deduction ({item.missing_timesheets} days)</p>
+                            {finalMissingDates.length > 0
+                              ? finalMissingDates.map((d: string) => <div key={d} className="text-red-700 dark:text-red-300">{fmt(d)}</div>)
+                              : item.missing_timesheets === 0
+                                ? <div className="text-green-600 italic">None — ₹0 deducted ✓</div>
+                                : <div className="text-red-500 italic">{item.missing_timesheets} day(s)</div>
+                            }
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>
