@@ -817,6 +817,76 @@ router.post('/employees/sync-biometric', async (req, res) => {
   }
 });
 
+router.get('/diagnose-lms', async (req, res) => {
+  const { employee_code, month, year, name } = req.query;
+  if (!employee_code || !month || !year) {
+    return res.status(400).json({ error: 'Missing employee_code, month, or year' });
+  }
+
+  let lmsClient;
+  try {
+    if (!lmsPool) return res.status(503).json({ error: 'LMS pool not configured' });
+    lmsClient = await lmsPool.connect();
+
+    // Step 1: Check if employee exists in LMS
+    const empRes = await lmsClient.query(
+      `SELECT id, name, employee_code FROM employees WHERE LOWER(TRIM(employee_code)) = LOWER(TRIM($1))${name ? ` OR LOWER(TRIM(name)) = LOWER(TRIM($2))` : ''}`,
+      name ? [employee_code, name] : [employee_code]
+    );
+
+    // Step 2: Check raw leaves for this employee_code
+    const rawLeavesRes = await lmsClient.query(
+      `SELECT l.id, l.user_id, l.leave_type, l.status, l.start_date, l.end_date, l.leave_duration_type
+       FROM leaves l
+       WHERE LOWER(TRIM(l.user_id)) = LOWER(TRIM($1))`,
+      [employee_code]
+    );
+
+    // Step 3: Run the actual leave query used in payroll
+    const leaveQuery = `
+      SELECT 
+        d::date AS leave_date,
+        l.leave_type,
+        l.leave_duration_type,
+        l.status
+      FROM leaves l
+      LEFT JOIN employees e ON e.employee_code = l.user_id
+      CROSS JOIN LATERAL (
+        SELECT CAST(d::date AS date) AS d FROM generate_series(
+          CAST(l.start_date AS date),
+          CAST(l.end_date AS date),
+          '1 day'::interval
+        ) d
+      ) dates
+      WHERE LOWER(l.status) = 'approved'
+        AND EXTRACT(MONTH FROM d::date) = $1
+        AND EXTRACT(YEAR FROM d::date) = $2
+        AND (
+          LOWER(TRIM(l.user_id)) = LOWER(TRIM($4))
+          OR LOWER(TRIM(e.name)) = LOWER(TRIM($3))
+        )
+    `;
+    const leaveRes = await lmsClient.query(leaveQuery, [month, year, name || '', employee_code]);
+
+    return res.json({
+      lms_employee_match: empRes.rows,
+      raw_leaves_for_code: rawLeavesRes.rows,
+      payroll_query_results: leaveRes.rows,
+      summary: {
+        employee_found_in_lms: empRes.rows.length > 0,
+        total_raw_leaves: rawLeavesRes.rows.length,
+        approved_leave_dates_in_month: leaveRes.rows.length,
+        leave_dates: leaveRes.rows.map((r: any) => { const dt = new Date(r.leave_date); const ds = `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`; return { date: ds, type: r.leave_type, status: r.status }; })
+      }
+    });
+  } catch (err) {
+    console.error('[DIAGNOSE-LMS] Error:', err);
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Diagnose failed' });
+  } finally {
+    if (lmsClient) lmsClient.release();
+  }
+});
+
 router.post('/payroll-items/external-data', async (req, res) => {
   const { employeeIds, month, year } = req.body;
 
@@ -837,10 +907,14 @@ router.post('/payroll-items/external-data', async (req, res) => {
       [month, year]
     );
     // All holiday dates (global)
-    const allHolidays: { date: string; applicable_departments: string[] | null }[] = holidayRes.rows.map(r => ({
-      date: new Date(r.date).toISOString().split('T')[0],
-      applicable_departments: r.applicable_departments || null
-    }));
+    const allHolidays: { date: string; applicable_departments: string[] | null }[] = holidayRes.rows.map(r => {
+      const dt = new Date(r.date);
+      const dateStr = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+      return {
+        date: dateStr,
+        applicable_departments: r.applicable_departments || null
+      };
+    });
     const globalHolidays = allHolidays.filter(h => !h.applicable_departments || h.applicable_departments.length === 0).map(h => h.date);
     const holidayCount = globalHolidays.length;
 
@@ -856,8 +930,8 @@ router.post('/payroll-items/external-data', async (req, res) => {
               d::date AS leave_date,
               l.leave_type,
               l.leave_duration_type
-            FROM employees e
-            JOIN leaves l ON e.employee_code = l.user_id
+            FROM leaves l
+            LEFT JOIN employees e ON e.employee_code = l.user_id
             CROSS JOIN LATERAL (
               SELECT CAST(d::date AS date) AS d FROM generate_series(
                 CAST(l.start_date AS date),
@@ -865,19 +939,16 @@ router.post('/payroll-items/external-data', async (req, res) => {
                 '1 day'::interval
               ) d
             ) dates
-            WHERE l.status = 'Approved'
-              AND EXTRACT(MONTH FROM d::date) = $2
-              AND EXTRACT(YEAR FROM d::date) = $3
+            WHERE LOWER(l.status) = 'approved'
+              AND EXTRACT(MONTH FROM d::date) = $1
+              AND EXTRACT(YEAR FROM d::date) = $2
               AND (
-                e.id = $1 
-                OR LOWER(TRIM(e.name)) = LOWER(TRIM($4))
-                OR (e.name ILIKE $4 || '%')
-                OR ($4 ILIKE e.name || '%')
-                OR LOWER(TRIM(e.employee_code)) = LOWER(TRIM($5))
+                LOWER(TRIM(l.user_id)) = LOWER(TRIM($4))
+                OR LOWER(TRIM(e.name)) = LOWER(TRIM($3))
               )
           `;
           console.log(`[EXTERNAL-DATA] Fetching leaves for ${emp.name} (code: ${emp.employee_code || 'N/A'})`);
-          const leaveRes = await lmsClient.query(leaveQuery, [emp.id, month, year, emp.name, emp.employee_code || emp.email]);
+          const leaveRes = await lmsClient.query(leaveQuery, [month, year, emp.name, emp.employee_code || '']);
 
           if (leaveRes.rows.length > 0) {
             // Separate OD dates from real leave dates
@@ -888,17 +959,18 @@ router.post('/payroll-items/external-data', async (req, res) => {
             const leaveTypeSummary: string[] = [];
 
             for (const row of leaveRes.rows) {
-              const d = new Date(row.leave_date).toISOString().split('T')[0];
+              const dt = new Date(row.leave_date);
+              const d = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
               const dayValue = row.leave_duration_type === 'Half Day' ? 0.5 : 1.0;
               allLeaveDates.push(d);
               totalCount += dayValue;
               leaveTypeSummary.push(row.leave_type);
 
               if (row.leave_type === 'OD') {
-                // OD = On Duty: no salary deduction, but still overlaps with TS missing
+                // Paid leaves: no salary deduction, but still overlaps with TS missing to exclude
                 odDates.push(d);
               } else {
-                // All other leave types (Casual, Sick, Earned, LWP, Comp Off) = unpaid
+                // All other leave types (Casual, Sick, LWP, Comp Off, Earned) = unpaid
                 unpaidCount += dayValue;
               }
             }
@@ -977,7 +1049,10 @@ router.post('/payroll-items/external-data', async (req, res) => {
         const emp = empMatch?.emp;
 
         if (emp) {
-          const workedDates = (row.worked_dates || []).map((d: Date | string) => new Date(d).toISOString().split('T')[0]);
+          const workedDates = (row.worked_dates || []).map((d: Date | string) => {
+            const dt = new Date(d);
+            return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+          });
           const workedDatesSet = new Set(workedDates);
 
           // Determine which holidays apply to this employee based on their department
@@ -990,7 +1065,7 @@ router.post('/payroll-items/external-data', async (req, res) => {
           let rawMissingDates: string[] = [];
           for (let d = 1; d <= calendarDays; d++) {
             const dt = new Date(year, month - 1, d);
-            const dstr = dt.toISOString().split('T')[0];
+            const dstr = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
             if (dt.getDay() === 0) continue; // Skip Sunday
             if (empHolidaySet.has(dstr)) continue; // Skip applicable holidays
             if (!workedDatesSet.has(dstr)) {
@@ -1021,6 +1096,8 @@ router.post('/payroll-items/external-data', async (req, res) => {
           console.log(`[EXTERNAL-DATA] ❌ Could not find employee for code ${row.employee_code} in fetched empData`);
         }
       }
+
+
     } else {
       console.warn('[EXTERNAL-DATA] Timesheet database URL not configured. Skipping external timesheet lookup.');
     }
@@ -1227,7 +1304,12 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       [payroll.month, payroll.year]
     );
     const holidayCount = holidayRes.rows.length;
-    const holidaySet = new Set(holidayRes.rows.map((r: any) => new Date(r.date).toISOString().split('T')[0]));
+    // Helper: convert DB date/timestamp to local YYYY-MM-DD string without UTC timezone shift
+    const toLocalDateStr = (d: Date | string): string => {
+      const dt = new Date(d);
+      return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+    };
+    const holidaySet = new Set(holidayRes.rows.map((r: any) => toLocalDateStr(r.date)));
     const holidayDatesAll = Array.from(holidaySet) as string[];
 
     const itemsResult = await payrollClient.query(
@@ -1273,8 +1355,8 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
               d::date AS leave_date,
               l.leave_type,
               l.leave_duration_type
-            FROM employees e
-            JOIN leaves l ON e.employee_code = l.user_id
+            FROM leaves l
+            LEFT JOIN employees e ON e.employee_code = l.user_id
             CROSS JOIN LATERAL (
               SELECT CAST(d::date AS date) AS d FROM generate_series(
                 CAST(l.start_date AS date),
@@ -1282,18 +1364,19 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
                 '1 day'::interval
               ) d
             ) dates
-            WHERE l.status = 'Approved'
-              AND EXTRACT(MONTH FROM d::date) = $2
-              AND EXTRACT(YEAR FROM d::date) = $3
+            WHERE LOWER(l.status) = 'approved'
+              AND EXTRACT(MONTH FROM d::date) = $1
+              AND EXTRACT(YEAR FROM d::date) = $2
               AND (
-                e.id = $1 
-                OR LOWER(TRIM(e.name)) = LOWER(TRIM($4))
-                OR (e.name ILIKE $4 || '%')
-                OR ($4 ILIKE e.name || '%')
-                OR LOWER(TRIM(e.employee_code)) = LOWER(TRIM($5))
+                LOWER(TRIM(l.user_id)) = LOWER(TRIM($4))
+                OR LOWER(TRIM(e.name)) = LOWER(TRIM($3))
+                OR (e.name ILIKE $3 || '%')
+                OR ($3 ILIKE e.name || '%')
               )
           `;
-          const leaveRes = await lmsClient.query(leaveQuery, [item.employee_id, payroll.month, payroll.year, item.employee_name, item.employee_email]);
+          const empCode = (item as any).employee_code || '';
+          console.log(`[ANALYSIS] LMS query for ${item.employee_name}, code: ${empCode}`);
+          const leaveRes = await lmsClient.query(leaveQuery, [payroll.month, payroll.year, item.employee_name, empCode]);
           if (leaveRes.rows.length > 0) {
             const allLeaveDates: string[] = [];
             const odDates: string[] = [];
@@ -1302,7 +1385,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
             const leaveTypeSummary: string[] = [];
 
             for (const row of leaveRes.rows) {
-              const d = new Date(row.leave_date).toISOString().split('T')[0];
+              const d = toLocalDateStr(row.leave_date);
               const dayValue = row.leave_duration_type === 'Half Day' ? 0.5 : 1.0;
               allLeaveDates.push(d);
               totalCount += dayValue;
@@ -1362,15 +1445,9 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
           const missingDates: string[] = [];
 
           if (lookupCodes.length === 0) {
-            console.warn(`[ANALYSIS] No TS lookup codes found for ${item.employee_name}; treating as no timesheet submitted.`);
-            for (let d = 1; d <= calendarDays; d++) {
-              const dt = new Date(payroll.year, payroll.month - 1, d);
-              const dstr = dt.toISOString().split('T')[0];
-              if (dt.getDay() === 0) continue;
-              if (holidaySet.has(dstr)) continue;
-              missingDates.push(dstr);
-            }
-            tsData = { missing_days: missingDates.length, missing_dates: missingDates, submitted_at: null };
+            console.warn(`[ANALYSIS] No TS lookup codes found for ${item.employee_name}; using stored DB values.`);
+            // No code at all — cannot look up → fall back to stored DB values unchanged
+            tsData = null;
           } else {
             const tsRes = await timesheetClient.query(
               `SELECT DISTINCT CAST(date AS date) AS d
@@ -1380,15 +1457,15 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
             );
 
             if (tsRes.rows.length > 0) {
-              const workedDatesSet = new Set(tsRes.rows.map((r: any) => new Date(r.d).toISOString().split('T')[0]));
+              // Employee has submitted some timesheet entries — compute missing days normally
+              const workedDatesSet = new Set(tsRes.rows.map((r: any) => toLocalDateStr(r.d)));
               for (let d = 1; d <= calendarDays; d++) {
                 const dt = new Date(payroll.year, payroll.month - 1, d);
-                const dstr = dt.toISOString().split('T')[0];
+                const dstr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
                 if (dt.getDay() === 0) continue;
                 if (holidaySet.has(dstr)) continue;
                 if (!workedDatesSet.has(dstr)) missingDates.push(dstr);
               }
-
               console.log(`[ANALYSIS] ✅ Found ${tsRes.rows.length} worked days for ${item.employee_name}, missing ${missingDates.length}`);
               tsData = {
                 missing_days: missingDates.length,
@@ -1396,15 +1473,21 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
                 submitted_at: new Date().toISOString()
               };
             } else {
-              console.log(`[ANALYSIS] ❌ No days found for ${item.employee_name} with lookup codes ${JSON.stringify(lookupCodes)}`);
+              // Employee code is known but ZERO entries in Timestrap = timesheet NOT submitted
+              // Count ALL working days (excl. Sundays and holidays) as missing
+              console.log(`[ANALYSIS] ⚠️ ${item.employee_name} (${JSON.stringify(lookupCodes)}) has NO timesheet entries — all working days counted as missing`);
               for (let d = 1; d <= calendarDays; d++) {
                 const dt = new Date(payroll.year, payroll.month - 1, d);
-                const dstr = dt.toISOString().split('T')[0];
+                const dstr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
                 if (dt.getDay() === 0) continue;
                 if (holidaySet.has(dstr)) continue;
                 missingDates.push(dstr);
               }
-              tsData = { missing_days: missingDates.length, missing_dates: missingDates, submitted_at: null };
+              tsData = {
+                missing_days: missingDates.length,
+                missing_dates: missingDates,
+                submitted_at: null  // null = not submitted
+              };
             }
           }
         } catch (error) {
@@ -1412,25 +1495,45 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
         }
       }
 
-      const missingDays = tsData?.missing_days ?? item.missing_timesheets ?? 0;
-      const missingDatesArray = tsData?.missing_dates ?? [];
       const leaveDatesArray = leaveData?.leave_dates ?? [];
       const leaveDateSet = new Set(leaveDatesArray);
 
-      // Filter out missing dates that fall on approved leave dates
-      const actualMissingDates = missingDatesArray.filter(d => !leaveDateSet.has(d));
-      const excludedDatesComputed = missingDatesArray.filter(d => leaveDateSet.has(d));
-      
-      // Prefer stored excluded dates if they exist, otherwise use computed ones
-      const finalExcludedDates = storedExcludedDates.length > 0 ? storedExcludedDates : excludedDatesComputed;
-      const finalHolidayDates = storedHolidayDates.length > 0 ? storedHolidayDates : holidayDatesAll;
-      
-      const leaveMatchedTsDays = finalExcludedDates.length;
-      const actualMissingTsDays = actualMissingDates.length;
+      // --- CASE 1: We have live timesheet data from Timestrap ---
+      // Compute missing dates and exclude any that are covered by approved leave
+      // --- CASE 2: No timesheet data (employee not in Timestrap or no entries found) ---
+      // Fall back to stored DB values - do NOT touch their deductions
 
-      const timesheetDeduction = Math.round(
-        ((monthlySalary || 0) / (calendarDays || 30)) * actualMissingTsDays * 100
-      ) / 100;
+      let actualMissingDates: string[];
+      let actualMissingTsDays: number;
+      let finalExcludedDates: string[];
+      let timesheetDeduction: number;
+
+      if (tsData !== null && tsData.missing_dates) {
+        // We have live TS data — compute overlap with leave dates
+        const rawMissingDates = tsData.missing_dates;
+        const excludedByLeave = rawMissingDates.filter((d: string) => leaveDateSet.has(d));
+        actualMissingDates = rawMissingDates.filter((d: string) => !leaveDateSet.has(d));
+        actualMissingTsDays = actualMissingDates.length;
+        finalExcludedDates = excludedByLeave;
+
+        timesheetDeduction = Math.round(
+          ((monthlySalary || 0) / (calendarDays || 30)) * actualMissingTsDays * 100
+        ) / 100;
+
+        console.log(`[ANALYSIS] ${item.employee_name}: leave_dates=${leaveDatesArray.length}, raw_missing=${rawMissingDates.length}, excluded_by_leave=${excludedByLeave.length}, final_deducted=${actualMissingTsDays}`);
+      } else {
+        // No live TS data — use stored DB values unchanged
+        actualMissingTsDays = Number(item.missing_timesheets) || 0;
+        actualMissingDates = storedExcludedDates.length > 0 ? [] : []; // No live data to filter
+        finalExcludedDates = storedExcludedDates;
+        timesheetDeduction = Number(item.timesheet_deduction) || 0;
+
+        console.log(`[ANALYSIS] ${item.employee_name}: No live TS data — using stored: ${actualMissingTsDays} missing days, deduction=${timesheetDeduction}`);
+      }
+
+      const finalHolidayDates = holidayDatesAll;
+
+      const leaveMatchedTsDays = finalExcludedDates.length;
 
       const leaveDeduction = Number(item.leave_deduction) || 0;
       const pfDeduction = Number(item.pf_deduction) || 0;
