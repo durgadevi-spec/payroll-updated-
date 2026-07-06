@@ -8,9 +8,10 @@ interface PreviewProps {
   employeeIds: string[];
   month: number;
   year: number;
+  viewOnly?: boolean;
 }
 
-const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
 function getAttClass(status: string) {
   if (status === 'Valid 9 Hours') return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
@@ -35,7 +36,7 @@ function SummaryBadge({ label, value, color }: { label: string; value: number | 
   );
 }
 
-export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employeeIds, month, year }: PreviewProps) {
+export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employeeIds, month, year, viewOnly = false }: PreviewProps) {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -119,11 +120,10 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                     <button
                       key={e.id}
                       onClick={() => setActiveEmpIdx(i)}
-                      className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-lg border-b-2 transition-colors whitespace-nowrap ${
-                        i === activeEmpIdx
-                          ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 bg-indigo-50/60 dark:bg-indigo-900/20'
-                          : 'border-transparent text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
-                      }`}
+                      className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-lg border-b-2 transition-colors whitespace-nowrap ${i === activeEmpIdx
+                        ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 bg-indigo-50/60 dark:bg-indigo-900/20'
+                        : 'border-transparent text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                        }`}
                     >
                       <User className="w-3.5 h-3.5" />
                       {e.name}
@@ -194,30 +194,27 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                           return (
                             <tr
                               key={idx}
-                              className={`border-b border-slate-100 dark:border-slate-800 transition-colors ${
-                                isDeductible
-                                  ? 'bg-red-50/60 dark:bg-red-900/10 hover:bg-red-100/60'
-                                  : isSunday || isSat
+                              className={`border-b border-slate-100 dark:border-slate-800 transition-colors ${isDeductible
+                                ? 'bg-red-50/60 dark:bg-red-900/10 hover:bg-red-100/60'
+                                : isSunday || isSat
                                   ? 'bg-slate-50/80 dark:bg-slate-800/30 hover:bg-slate-100/60'
                                   : 'hover:bg-indigo-50/30 dark:hover:bg-slate-800/20'
-                              }`}
+                                }`}
                             >
                               {/* Date */}
                               <td className="px-4 py-2 whitespace-nowrap">
                                 <div className="flex items-center gap-2">
-                                  <span className={`w-7 h-7 rounded-md flex items-center justify-center text-xs font-bold ${
-                                    isSunday ? 'bg-slate-200 text-slate-500 dark:bg-slate-700 dark:text-slate-400'
+                                  <span className={`w-7 h-7 rounded-md flex items-center justify-center text-xs font-bold ${isSunday ? 'bg-slate-200 text-slate-500 dark:bg-slate-700 dark:text-slate-400'
                                     : isSat ? 'bg-slate-100 text-slate-400 dark:bg-slate-700/60 dark:text-slate-500'
-                                    : isDeductible ? 'bg-red-100 text-red-600 dark:bg-red-900/40 dark:text-red-400'
-                                    : 'bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300'
-                                  }`}>
+                                      : isDeductible ? 'bg-red-100 text-red-600 dark:bg-red-900/40 dark:text-red-400'
+                                        : 'bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300'
+                                    }`}>
                                     {new Date(day.date + 'T00:00:00').getDate()}
                                   </span>
                                   <div>
                                     <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">{day.date}</p>
-                                    <p className={`text-[10px] font-medium ${
-                                      isSunday ? 'text-slate-400' : isSat ? 'text-slate-400' : 'text-slate-400'
-                                    }`}>{day.day}</p>
+                                    <p className={`text-[10px] font-medium ${isSunday ? 'text-slate-400' : isSat ? 'text-slate-400' : 'text-slate-400'
+                                      }`}>{day.day}</p>
                                   </div>
                                 </div>
                               </td>
@@ -238,9 +235,8 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
 
                               {/* Hours */}
                               <td className="px-3 py-2 text-center">
-                                <span className={`text-xs font-medium tabular-nums ${
-                                  parseFloat(day.total_hours) > 0 ? 'text-slate-700 dark:text-slate-300' : 'text-slate-300 dark:text-slate-600'
-                                }`}>
+                                <span className={`text-xs font-medium tabular-nums ${parseFloat(day.total_hours) > 0 ? 'text-slate-700 dark:text-slate-300' : 'text-slate-300 dark:text-slate-600'
+                                  }`}>
                                   {day.total_hours === '0.0' ? '—' : `${day.total_hours}h`}
                                 </span>
                               </td>
@@ -266,11 +262,10 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
 
                               {/* Eligible Hours */}
                               <td className="px-3 py-2 text-center">
-                                <span className={`text-xs font-bold tabular-nums ${
-                                  parseFloat(day.eligible_hours) >= 9 ? 'text-emerald-600 dark:text-emerald-400'
+                                <span className={`text-xs font-bold tabular-nums ${parseFloat(day.eligible_hours) >= 9 ? 'text-emerald-600 dark:text-emerald-400'
                                   : parseFloat(day.eligible_hours) > 0 ? 'text-amber-600 dark:text-amber-400'
-                                  : 'text-slate-300 dark:text-slate-600'
-                                }`}>
+                                    : 'text-slate-300 dark:text-slate-600'
+                                  }`}>
                                   {day.eligible_hours === '0.00' ? '—' : `${day.eligible_hours}h`}
                                 </span>
                               </td>
@@ -317,6 +312,69 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                     </table>
                   </div>
 
+                  {/* ── Salary Breakdown Panel ── */}
+                  {(() => {
+                    const monthlySalary = emp.ctc ? Math.round(emp.ctc / 12) : 0;
+                    const calDays = emp.days?.length || 30;
+                    const perDay = calDays > 0 ? monthlySalary / calDays : 0;
+                    const unpaidDays = emp.summary.unpaidDays || 0;
+                    const leaveDeduction = Math.round(perDay * unpaidDays);
+                    const punchMissingDays = emp.summary.punchMissing || 0;
+                    const punchDeduction = Math.round(perDay * punchMissingDays);
+                    const permExceededDays = emp.summary.permissionLimitExceededDays || 0;
+                    const permDeduction = Math.round(perDay * permExceededDays);
+                    const grossAfterLeave = Math.max(0, monthlySalary - leaveDeduction - punchDeduction - permDeduction);
+                    const pfDeduction = Math.round(Math.min(grossAfterLeave * 0.12, 1800));
+                    const esiDeduction = grossAfterLeave <= 21000 ? Math.round(grossAfterLeave * 0.0075) : 0;
+                    const netSalary = Math.max(0, grossAfterLeave - pfDeduction - esiDeduction);
+                    const fmt = (n: number) => '₹' + n.toLocaleString('en-IN');
+                    return (
+                      <div className="mx-4 mb-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-sm flex-shrink-0">
+                        <div className="px-4 py-2 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2">
+                          <span className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wider">💰 Salary Breakdown</span>
+                          <span className="text-[10px] text-slate-400">estimated from attendance data</span>
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-y divide-slate-100 dark:divide-slate-800">
+                          <div className="px-4 py-3">
+                            <p className="text-[10px] text-slate-400 uppercase tracking-wide font-medium mb-0.5">Annual CTC</p>
+                            <p className="text-sm font-bold text-slate-800 dark:text-white">{fmt(emp.ctc || 0)}</p>
+                          </div>
+                          <div className="px-4 py-3">
+                            <p className="text-[10px] text-slate-400 uppercase tracking-wide font-medium mb-0.5">Monthly Salary</p>
+                            <p className="text-sm font-bold text-slate-800 dark:text-white">{fmt(monthlySalary)}</p>
+                          </div>
+                          <div className="px-4 py-3">
+                            <p className="text-[10px] text-slate-400 uppercase tracking-wide font-medium mb-0.5">Leave Deduction</p>
+                            <p className="text-sm font-bold text-red-500">{unpaidDays > 0 ? `-${fmt(leaveDeduction)}` : '₹0'}</p>
+                            <p className="text-[10px] text-slate-400 mt-0.5">{unpaidDays} unpaid day{unpaidDays !== 1 ? 's' : ''}</p>
+                          </div>
+                          <div className="px-4 py-3">
+                            <p className="text-[10px] text-slate-400 uppercase tracking-wide font-medium mb-0.5">Missing Punch Ded.</p>
+                            <p className="text-sm font-bold text-orange-500">{punchMissingDays > 0 ? `-${fmt(punchDeduction)}` : '₹0'}</p>
+                            <p className="text-[10px] text-slate-400 mt-0.5">{punchMissingDays} day{punchMissingDays !== 1 ? 's' : ''}</p>
+                          </div>
+                          <div className="px-4 py-3">
+                            <p className="text-[10px] text-slate-400 uppercase tracking-wide font-medium mb-0.5">Permission Ded.</p>
+                            <p className="text-sm font-bold text-fuchsia-500">{permExceededDays > 0 ? `-${fmt(permDeduction)}` : '₹0'}</p>
+                            <p className="text-[10px] text-slate-400 mt-0.5">{permExceededDays} exceeded day{permExceededDays !== 1 ? 's' : ''}</p>
+                          </div>
+                          <div className="px-4 py-3">
+                            <p className="text-[10px] text-slate-400 uppercase tracking-wide font-medium mb-0.5">PF (12%)</p>
+                            <p className="text-sm font-bold text-red-400">-{fmt(pfDeduction)}</p>
+                          </div>
+                          <div className="px-4 py-3">
+                            <p className="text-[10px] text-slate-400 uppercase tracking-wide font-medium mb-0.5">ESI (0.75%)</p>
+                            <p className="text-sm font-bold text-red-400">{esiDeduction > 0 ? `-${fmt(esiDeduction)}` : '₹0'}</p>
+                          </div>
+                          <div className="px-4 py-3 bg-emerald-50 dark:bg-emerald-900/20">
+                            <p className="text-[10px] text-emerald-600 dark:text-emerald-400 uppercase tracking-wide font-bold mb-0.5">Net Salary</p>
+                            <p className="text-base font-extrabold text-emerald-600 dark:text-emerald-400">{fmt(netSalary)}</p>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* ── Employee navigation (if multiple) ── */}
                   {employees.length > 1 && (
                     <div className="px-6 py-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between bg-white dark:bg-slate-900 flex-shrink-0">
@@ -353,16 +411,18 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
               onClick={onClose}
               className="px-5 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 dark:bg-slate-800 dark:text-slate-200 dark:border-slate-600 dark:hover:bg-slate-700 transition-colors"
             >
-              Cancel
+              {viewOnly ? 'Close' : 'Cancel'}
             </button>
-            <button
-              onClick={() => onConfirm(data)}
-              disabled={loading || employees.length === 0}
-              className="flex items-center gap-2 px-6 py-2 text-sm font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              <Check className="w-4 h-4" />
-              Confirm &amp; Generate Payroll
-            </button>
+            {!viewOnly && (
+              <button
+                onClick={() => onConfirm(data)}
+                disabled={loading || employees.length === 0}
+                className="flex items-center gap-2 px-6 py-2 text-sm font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <Check className="w-4 h-4" />
+                Confirm &amp; Generate Payroll
+              </button>
+            )}
           </div>
         </div>
 
