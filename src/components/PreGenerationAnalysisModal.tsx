@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { X, Check, AlertTriangle, User, Clock, Calendar, ChevronLeft, ChevronRight } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { X, Check, AlertTriangle, Calendar, ChevronLeft, ChevronRight, ChevronDown } from 'lucide-react';
 
 interface PreviewProps {
   isOpen: boolean;
@@ -9,90 +9,127 @@ interface PreviewProps {
   month: number;
   year: number;
   viewOnly?: boolean;
+  fullPage?: boolean;
 }
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
+// ── Semantic status styling — restrained, two-tone, no rainbow ──
 function getAttClass(status: string) {
-  if (status === 'Valid 9 Hours') return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
-  if (status === 'N/A') return 'bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-400';
-  if (status === 'Less Than 9 Hours') return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
-  return 'bg-red-100 text-red-600 dark:bg-red-900/40 dark:text-red-300';
+  if (status === 'Valid 9 Hours') return 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:ring-emerald-500/20';
+  if (status === 'N/A') return 'bg-slate-100 text-slate-500 ring-1 ring-inset ring-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:ring-slate-700';
+  if (status === 'Less Than 9 Hours') return 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:ring-amber-500/20';
+  return 'bg-red-50 text-red-700 ring-1 ring-inset ring-red-200 dark:bg-red-500/10 dark:text-red-400 dark:ring-red-500/20';
 }
 
 function getPaidClass(status: string) {
-  if (status.includes('Unpaid') || status.includes('Sandwich')) return 'bg-red-100 text-red-700 font-semibold dark:bg-red-900/40 dark:text-red-300';
-  if (status.includes('Paid Leave')) return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
-  if (status.includes('OD')) return 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300';
-  return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
+  if (status.includes('Unpaid') || status.includes('Sandwich')) return 'bg-red-50 text-red-700 ring-1 ring-inset ring-red-200 font-medium dark:bg-red-500/10 dark:text-red-400 dark:ring-red-500/20';
+  if (status.includes('Paid Leave')) return 'bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-200 dark:bg-blue-500/10 dark:text-blue-400 dark:ring-blue-500/20';
+  if (status.includes('OD')) return 'bg-violet-50 text-violet-700 ring-1 ring-inset ring-violet-200 dark:bg-violet-500/10 dark:text-violet-400 dark:ring-violet-500/20';
+  return 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:ring-emerald-500/20';
 }
 
-function SummaryBadge({ label, value, color }: { label: string; value: number | string; color: string }) {
+// Neutral by default; only shifts to a semantic color when the number is worth flagging
+function Stat({ label, value, tone = 'neutral' }: { label: string; value: number | string; tone?: 'neutral' | 'good' | 'warn' | 'bad' }) {
+  const toneClass = {
+    neutral: 'text-slate-900 dark:text-white',
+    good: 'text-emerald-600 dark:text-emerald-400',
+    warn: 'text-amber-600 dark:text-amber-400',
+    bad: 'text-red-600 dark:text-red-400',
+  }[tone];
   return (
-    <div className={`flex flex-col items-center px-4 py-2 rounded-lg ${color}`}>
-      <span className="text-lg font-bold leading-tight">{value}</span>
-      <span className="text-[10px] font-medium uppercase tracking-wide mt-0.5 opacity-80 whitespace-nowrap">{label}</span>
+    <div className="flex flex-col items-start px-4 py-2.5 min-w-[92px] border-l border-slate-200 dark:border-slate-700 first:border-l-0 first:pl-0">
+      <span className={`text-xl font-semibold leading-tight tabular-nums ${toneClass}`}>{value}</span>
+      <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mt-0.5 whitespace-nowrap">{label}</span>
     </div>
   );
 }
 
-export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employeeIds, month, year, viewOnly = false }: PreviewProps) {
+export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employeeIds, month, year, viewOnly = false, fullPage = false }: PreviewProps) {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeEmpIdx, setActiveEmpIdx] = useState(0);
+  const [showStats, setShowStats] = useState(false);
+  const lastFetchKey = useRef<string>('');
+
+  // Stabilize employeeIds so array reference changes don't re-trigger
+  const empIdsKey = JSON.stringify(employeeIds);
 
   useEffect(() => {
-    if (isOpen && employeeIds.length > 0) {
-      setLoading(true);
-      setError(null);
-      setActiveEmpIdx(0);
-      fetch('/api/payroll/generation-preview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ employeeIds, month, year })
+    if (!isOpen || employeeIds.length === 0) return;
+    const fetchKey = `${month}-${year}-${empIdsKey}`;
+    if (lastFetchKey.current === fetchKey && data) return; // Already loaded this exact data
+    lastFetchKey.current = fetchKey;
+    setLoading(true);
+    setError(null);
+    setActiveEmpIdx(0);
+    setShowStats(false);
+    fetch('/api/payroll/generation-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ employeeIds, month, year })
+    })
+      .then(res => {
+        if (!res.ok) throw new Error(`Server error: ${res.status}`);
+        return res.json();
       })
-        .then(res => {
-          if (!res.ok) throw new Error(`Server error: ${res.status}`);
-          return res.json();
-        })
-        .then(resData => {
-          setData(resData);
-          setLoading(false);
-        })
-        .catch(err => {
-          console.error(err);
-          setError(err.message);
-          setLoading(false);
-        });
+      .then(resData => {
+        setData(resData);
+        setLoading(false);
+      })
+      .catch(err => {
+        console.error(err);
+        setError(err.message);
+        setLoading(false);
+      });
+  }, [isOpen, empIdsKey, month, year]);
+
+  // Reset the fetch key when modal closes so re-opening will re-fetch
+  useEffect(() => {
+    if (!isOpen) {
+      lastFetchKey.current = '';
     }
-  }, [isOpen, employeeIds, month, year]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
   const employees = data?.employees || [];
   const emp = employees[activeEmpIdx];
 
+  const wrapperClass = fullPage
+    ? 'fixed inset-0 z-50 flex items-stretch justify-center bg-slate-900/50 backdrop-blur-sm overflow-hidden'
+    : 'fixed inset-0 z-50 flex items-start justify-center pt-4 pb-4 px-4 bg-slate-900/50 backdrop-blur-sm overflow-y-auto';
+
+  const containerClass = fullPage
+    ? 'bg-white dark:bg-slate-900 w-full h-full flex flex-col'
+    : 'bg-white dark:bg-slate-900 rounded-xl shadow-xl ring-1 ring-black/5 w-full max-w-6xl flex flex-col';
+
+  const containerStyle: any = fullPage
+    ? { minHeight: '100vh', maxHeight: '100vh' }
+    : { minHeight: '80vh', maxHeight: '95vh' };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-4 pb-4 px-4 bg-slate-900/60 backdrop-blur-sm overflow-y-auto">
-      <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-6xl flex flex-col" style={{ minHeight: '80vh', maxHeight: '95vh' }}>
+    <div className={wrapperClass}>
+      <div className={containerClass} style={containerStyle}>
 
         {/* ── Modal Header ── */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 rounded-t-2xl flex-shrink-0">
+        <div className="flex items-center justify-between px-6 py-3.5 border-b border-slate-200 dark:border-slate-700 flex-shrink-0">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-indigo-600 flex items-center justify-center">
+            <div className="w-8 h-8 rounded-md bg-indigo-600 flex items-center justify-center flex-shrink-0">
               <Calendar className="w-4 h-4 text-white" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-slate-900 dark:text-white leading-tight">Payroll Verification &amp; Analysis</h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400">{MONTH_NAMES[month - 1]} {year} · Review before generating</p>
+              <h2 className="text-sm font-semibold text-slate-900 dark:text-white leading-tight">Payroll verification and analysis</h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{MONTH_NAMES[month - 1]} {year} · Review before generating</p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            aria-label="Close"
+            className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded-md hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4.5 h-4.5" />
           </button>
         </div>
 
@@ -100,13 +137,13 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
         <div className="flex-1 overflow-hidden flex flex-col">
 
           {loading ? (
-            <div className="flex flex-col items-center justify-center py-20 gap-4 text-slate-500">
-              <div className="animate-spin rounded-full h-10 w-10 border-2 border-indigo-500 border-t-transparent" />
+            <div className="flex flex-col items-center justify-center py-20 gap-3 text-slate-500 dark:text-slate-400">
+              <div className="animate-spin rounded-full h-8 w-8 border-2 border-indigo-500 border-t-transparent" />
               <p className="text-sm">Analyzing attendance, LMS leaves, and sandwich rules…</p>
             </div>
           ) : error ? (
             <div className="flex flex-col items-center justify-center py-20 gap-3 text-red-500">
-              <AlertTriangle className="w-8 h-8" />
+              <AlertTriangle className="w-7 h-7" />
               <p className="text-sm font-medium">{error}</p>
             </div>
           ) : employees.length === 0 ? (
@@ -115,20 +152,28 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
             <>
               {/* ── Employee Tabs ── */}
               {employees.length > 1 && (
-                <div className="flex gap-1 px-6 pt-3 pb-0 border-b border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-x-auto flex-shrink-0">
+                <div className="flex gap-0.5 px-4 border-b border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/30 overflow-x-auto flex-shrink-0">
                   {employees.map((e: any, i: number) => (
                     <button
                       key={e.id}
                       onClick={() => setActiveEmpIdx(i)}
-                      className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-lg border-b-2 transition-colors whitespace-nowrap ${i === activeEmpIdx
-                        ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 bg-indigo-50/60 dark:bg-indigo-900/20'
-                        : 'border-transparent text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                      className={`relative flex items-center gap-2 px-3.5 py-2.5 text-[13px] font-medium transition-colors whitespace-nowrap ${i === activeEmpIdx
+                        ? 'text-indigo-600 dark:text-indigo-400'
+                        : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
                         }`}
                     >
-                      <User className="w-3.5 h-3.5" />
+                      <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-semibold ${i === activeEmpIdx
+                        ? 'bg-indigo-600 text-white'
+                        : 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
+                        }`}>
+                        {e.name.charAt(0).toUpperCase()}
+                      </span>
                       {e.name}
                       {e.summary.unpaidDays > 0 && (
-                        <span className="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full leading-none">{e.summary.unpaidDays}</span>
+                        <span className="text-[10px] font-semibold text-red-600 dark:text-red-400">{e.summary.unpaidDays}</span>
+                      )}
+                      {i === activeEmpIdx && (
+                        <span className="absolute left-0 right-0 -bottom-px h-[2px] bg-indigo-600 dark:bg-indigo-400" />
                       )}
                     </button>
                   ))}
@@ -139,51 +184,66 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                 <div className="flex flex-col flex-1 overflow-hidden">
 
                   {/* ── Employee Summary Bar ── */}
-                  <div className="px-6 py-4 bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-700 flex-shrink-0">
-                    <div className="flex flex-wrap items-center justify-between gap-4">
-                      {/* Name + CTC */}
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold text-sm">
+                  <div className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700 flex-shrink-0">
+                    <button
+                      onClick={() => setShowStats(s => !s)}
+                      className="w-full flex items-center justify-between gap-4 px-6 py-3.5 hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors"
+                    >
+                      {/* Name + Salary */}
+                      <div className="flex items-center gap-3 min-w-[180px]">
+                        <div className="w-9 h-9 rounded-full bg-indigo-600 flex items-center justify-center text-white font-semibold text-sm flex-shrink-0">
                           {emp.name.charAt(0).toUpperCase()}
                         </div>
-                        <div>
-                          <p className="font-bold text-slate-900 dark:text-white text-base leading-tight">{emp.name}</p>
-                          <p className="text-xs text-slate-500 dark:text-slate-400">
-                            Monthly Salary: ₹{emp.ctc ? Math.round(emp.ctc / 12).toLocaleString('en-IN') : '—'}
+                        <div className="text-left">
+                          <p className="font-semibold text-slate-900 dark:text-white text-[14px] leading-tight">{emp.name}</p>
+                          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                            ₹{emp.ctc ? Math.round(emp.ctc / 12).toLocaleString('en-IN') : '—'} / month
                           </p>
                         </div>
                       </div>
-                      {/* Summary Badges */}
-                      <div className="flex flex-wrap gap-2">
-                        <SummaryBadge label="Days in Month" value={emp.days?.length || 0} color="bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200" />
-                        <SummaryBadge label="Payable Days" value={emp.summary.totalPayable} color="bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300" />
-                        <SummaryBadge label="Paid Leaves" value={emp.summary.paidLeaves} color="bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300" />
-                        <SummaryBadge label="Unpaid Days" value={emp.summary.unpaidDays} color="bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300" />
-                        {emp.summary.lessThan9 > 0 && <SummaryBadge label="< 9 Hours" value={emp.summary.lessThan9} color="bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300" />}
-                        {emp.summary.punchMissing > 0 && <SummaryBadge label="Punch Missing" value={emp.summary.punchMissing} color="bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300" />}
-                        {emp.summary.sundayDeductions > 0 && <SummaryBadge label="Sandwich" value={emp.summary.sundayDeductions} color="bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300" />}
-                        {emp.summary.halfDayLeaves > 0 && <SummaryBadge label="Half-Day Leaves" value={emp.summary.halfDayLeaves} color="bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300" />}
-                        <SummaryBadge label="Perm Used" value={parseFloat(emp.summary.monthlyAllowanceUsed).toFixed(1) + 'h'} color="bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300" />
-                        {emp.summary.permissionLimitExceededDays > 0 && <SummaryBadge label="Perm Exceeded" value={emp.summary.permissionLimitExceededDays} color="bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-900/40 dark:text-fuchsia-300" />}
+
+                      <div className="flex items-center gap-2 text-slate-400 dark:text-slate-500">
+                        <span className="text-xs font-medium hidden sm:inline">{showStats ? 'Hide summary' : 'Show summary'}</span>
+                        <ChevronDown className={`w-4 h-4 transition-transform ${showStats ? 'rotate-180' : ''}`} />
                       </div>
-                    </div>
+                    </button>
+
+                    {/* Stat strip — collapsible */}
+                    {showStats && (
+                      <div className="px-6 pb-3.5 flex items-stretch flex-wrap border-t border-slate-100 dark:border-slate-800 pt-3.5">
+                        <Stat label="Days in month" value={emp.days?.length || 0} />
+                        <Stat label="Payable days" value={emp.summary.totalPayable} tone="good" />
+                        <Stat label="Paid leaves" value={emp.summary.paidLeaves} />
+                        {(() => {
+                          const nonLeave = (emp.summary.punchMissing || 0) + (emp.summary.sundayDeductions || 0) + (emp.summary.lessThan9 || 0);
+                          const trueUnpaidLeaves = Math.max(0, (emp.summary.unpaidDays || 0) - nonLeave);
+                          return <Stat label="Unpaid leaves" value={trueUnpaidLeaves} tone={trueUnpaidLeaves > 0 ? 'bad' : 'neutral'} />;
+                        })()}
+                        {emp.summary.lessThan9 > 0 && <Stat label="Under 9 hrs" value={emp.summary.lessThan9} tone="warn" />}
+                        {emp.summary.punchMissing > 0 && <Stat label="Punch missing" value={emp.summary.punchMissing} tone="warn" />}
+                        {emp.summary.sundayDeductions > 0 && <Stat label="Sandwich ded." value={emp.summary.sundayDeductions} tone="bad" />}
+                        {emp.summary.halfDayLeaves > 0 && <Stat label="Half-day leaves" value={emp.summary.halfDayLeaves} />}
+                        <Stat label="Permission used" value={parseFloat(emp.summary.monthlyAllowanceUsed).toFixed(1) + 'h'} />
+                        {emp.summary.permissionLimitExceededDays > 0 && <Stat label="Perm. exceeded" value={emp.summary.permissionLimitExceededDays} tone="bad" />}
+                      </div>
+                    )}
                   </div>
 
                   {/* ── Day-by-Day Table ── */}
-                  <div className="flex-1 overflow-auto">
+                  <div className="flex-1 min-h-[300px] overflow-auto bg-white dark:bg-slate-900">
                     <table className="w-full text-sm border-collapse">
                       <thead>
-                        <tr className="bg-slate-100 dark:bg-slate-800 sticky top-0 z-10">
-                          <th className="text-left px-4 py-2.5 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-slate-200 dark:border-slate-700 w-36">Date</th>
-                          <th className="text-center px-3 py-2.5 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-slate-200 dark:border-slate-700 w-24">Punch In</th>
-                          <th className="text-center px-3 py-2.5 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-slate-200 dark:border-slate-700 w-24">Punch Out</th>
-                          <th className="text-center px-3 py-2.5 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-slate-200 dark:border-slate-700 w-16">Hours</th>
-                          <th className="text-center px-3 py-2.5 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-slate-200 dark:border-slate-700 w-28">Permission</th>
-                          <th className="text-center px-3 py-2.5 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-slate-200 dark:border-slate-700 w-16">Eligible</th>
-                          <th className="text-center px-3 py-2.5 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-slate-200 dark:border-slate-700 w-32">Attendance</th>
-                          <th className="text-left px-3 py-2.5 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-slate-200 dark:border-slate-700 w-36">LMS Leave</th>
-                          <th className="text-center px-3 py-2.5 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-slate-200 dark:border-slate-700 w-32">Paid / Unpaid</th>
-                          <th className="text-left px-3 py-2.5 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide border-b border-slate-200 dark:border-slate-700">Deduction Reason</th>
+                        <tr className="bg-slate-100 dark:bg-slate-800/60 sticky top-0 z-10">
+                          <th className="text-left px-4 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-r border-slate-200 dark:border-slate-700 w-32">Date</th>
+                          <th className="text-center px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-r border-slate-200 dark:border-slate-700 w-24">Punch in</th>
+                          <th className="text-center px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-r border-slate-200 dark:border-slate-700 w-24">Punch out</th>
+                          <th className="text-center px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-r border-slate-200 dark:border-slate-700 w-16">Hours</th>
+                          <th className="text-center px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-r border-slate-200 dark:border-slate-700 w-28">Permission</th>
+                          <th className="text-center px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-r border-slate-200 dark:border-slate-700 w-16">Eligible</th>
+                          <th className="text-center px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-r border-slate-200 dark:border-slate-700 w-32">Attendance</th>
+                          <th className="text-left px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-r border-slate-200 dark:border-slate-700 w-36">LMS leave</th>
+                          <th className="text-center px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-r border-slate-200 dark:border-slate-700 w-32">Paid / unpaid</th>
+                          <th className="text-left px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide border-b border-slate-200 dark:border-slate-700">Deduction reason</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -191,69 +251,70 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                           const isDeductible = day.salary_deduction_applicable;
                           const isSunday = day.day === 'Sun';
                           const isSat = day.day === 'Sat';
+                          const isWeekend = isSunday || isSat;
+                          const zebra = idx % 2 === 1;
                           return (
                             <tr
                               key={idx}
                               className={`border-b border-slate-100 dark:border-slate-800 transition-colors ${isDeductible
-                                ? 'bg-red-50/60 dark:bg-red-900/10 hover:bg-red-100/60'
-                                : isSunday || isSat
-                                  ? 'bg-slate-50/80 dark:bg-slate-800/30 hover:bg-slate-100/60'
-                                  : 'hover:bg-indigo-50/30 dark:hover:bg-slate-800/20'
+                                ? 'bg-red-50/60 dark:bg-red-500/5 hover:bg-red-50 dark:hover:bg-red-500/10'
+                                : isWeekend
+                                  ? 'bg-slate-50 dark:bg-slate-800/20 hover:bg-slate-100 dark:hover:bg-slate-800/40'
+                                  : zebra
+                                    ? 'bg-slate-50/40 dark:bg-slate-800/10 hover:bg-slate-50 dark:hover:bg-slate-800/30'
+                                    : 'hover:bg-slate-50 dark:hover:bg-slate-800/30'
                                 }`}
                             >
                               {/* Date */}
-                              <td className="px-4 py-2 whitespace-nowrap">
-                                <div className="flex items-center gap-2">
-                                  <span className={`w-7 h-7 rounded-md flex items-center justify-center text-xs font-bold ${isSunday ? 'bg-slate-200 text-slate-500 dark:bg-slate-700 dark:text-slate-400'
-                                    : isSat ? 'bg-slate-100 text-slate-400 dark:bg-slate-700/60 dark:text-slate-500'
-                                      : isDeductible ? 'bg-red-100 text-red-600 dark:bg-red-900/40 dark:text-red-400'
-                                        : 'bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300'
+                              <td className="px-4 py-2.5 whitespace-nowrap border-r border-slate-100 dark:border-slate-800">
+                                <div className="flex items-center gap-2.5">
+                                  <span className={`w-6 h-6 rounded flex items-center justify-center text-[11px] font-semibold tabular-nums flex-shrink-0 ${isWeekend
+                                    ? 'bg-slate-200 text-slate-500 dark:bg-slate-700 dark:text-slate-400'
+                                    : isDeductible
+                                      ? 'bg-red-100 text-red-600 dark:bg-red-500/15 dark:text-red-400'
+                                      : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'
                                     }`}>
                                     {new Date(day.date + 'T00:00:00').getDate()}
                                   </span>
                                   <div>
-                                    <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">{day.date}</p>
-                                    <p className={`text-[10px] font-medium ${isSunday ? 'text-slate-400' : isSat ? 'text-slate-400' : 'text-slate-400'
-                                      }`}>{day.day}</p>
+                                    <p className="text-xs font-medium text-slate-700 dark:text-slate-200">{day.date}</p>
+                                    <p className="text-[10px] text-slate-400">{day.day}</p>
                                   </div>
                                 </div>
                               </td>
 
                               {/* Punch In */}
-                              <td className="px-3 py-2 text-center">
-                                <span className={`text-xs font-medium ${day.punch_in === '-' ? 'text-slate-300 dark:text-slate-600' : 'text-slate-700 dark:text-slate-200'}`}>
+                              <td className="px-3 py-2.5 text-center border-r border-slate-100 dark:border-slate-800">
+                                <span className={`text-xs tabular-nums ${day.punch_in === '-' ? 'text-slate-300 dark:text-slate-600' : 'text-slate-700 dark:text-slate-200'}`}>
                                   {day.punch_in}
                                 </span>
                               </td>
 
                               {/* Punch Out */}
-                              <td className="px-3 py-2 text-center">
-                                <span className={`text-xs font-medium ${day.punch_out === '-' ? 'text-slate-300 dark:text-slate-600' : 'text-slate-700 dark:text-slate-200'}`}>
+                              <td className="px-3 py-2.5 text-center border-r border-slate-100 dark:border-slate-800">
+                                <span className={`text-xs tabular-nums ${day.punch_out === '-' ? 'text-slate-300 dark:text-slate-600' : 'text-slate-700 dark:text-slate-200'}`}>
                                   {day.punch_out}
                                 </span>
                               </td>
 
                               {/* Hours */}
-                              <td className="px-3 py-2 text-center">
-                                <span className={`text-xs font-medium tabular-nums ${parseFloat(day.total_hours) > 0 ? 'text-slate-700 dark:text-slate-300' : 'text-slate-300 dark:text-slate-600'
+                              <td className="px-3 py-2.5 text-center border-r border-slate-100 dark:border-slate-800">
+                                <span className={`text-xs tabular-nums ${parseFloat(day.total_hours) > 0 ? 'text-slate-700 dark:text-slate-300' : 'text-slate-300 dark:text-slate-600'
                                   }`}>
                                   {day.total_hours === '0.0' ? '—' : `${day.total_hours}h`}
                                 </span>
                               </td>
 
                               {/* Permission */}
-                              <td className="px-3 py-2">
+                              <td className="px-3 py-2.5 border-r border-slate-100 dark:border-slate-800">
                                 <div className="flex flex-col items-center justify-center">
                                   {day.permission_status === 'Approved' ? (
-                                    <div className="flex flex-col items-center bg-teal-50 dark:bg-teal-900/30 px-2 py-0.5 rounded border border-teal-100 dark:border-teal-800">
-                                      <span className="text-[10px] text-teal-700 dark:text-teal-300 font-medium whitespace-nowrap">{day.permission_from} - {day.permission_to}</span>
-                                      <span className="text-[10px] font-bold text-teal-600 dark:text-teal-400">+{day.permission_hours}h</span>
+                                    <div className="flex flex-col items-center">
+                                      <span className="text-[10px] text-slate-500 dark:text-slate-400 whitespace-nowrap">{day.permission_from}–{day.permission_to}</span>
+                                      <span className="text-[10px] font-semibold text-blue-600 dark:text-blue-400 tabular-nums">+{day.permission_hours}h</span>
                                     </div>
                                   ) : parseFloat(day.monthly_permission_used) > 0 ? (
-                                    <div className="flex flex-col items-center bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 rounded border border-blue-100 dark:border-blue-800">
-                                      <span className="text-[10px] text-blue-700 dark:text-blue-300 font-medium whitespace-nowrap">Allowance</span>
-                                      <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400">+{day.monthly_permission_used}h</span>
-                                    </div>
+                                    <span className="text-[10px] font-semibold text-blue-600 dark:text-blue-400 tabular-nums">+{day.monthly_permission_used}h</span>
                                   ) : (
                                     <span className="text-slate-300 dark:text-slate-600 text-xs">—</span>
                                   )}
@@ -261,8 +322,8 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                               </td>
 
                               {/* Eligible Hours */}
-                              <td className="px-3 py-2 text-center">
-                                <span className={`text-xs font-bold tabular-nums ${parseFloat(day.eligible_hours) >= 9 ? 'text-emerald-600 dark:text-emerald-400'
+                              <td className="px-3 py-2.5 text-center border-r border-slate-100 dark:border-slate-800">
+                                <span className={`text-xs font-semibold tabular-nums ${parseFloat(day.eligible_hours) >= 9 ? 'text-emerald-600 dark:text-emerald-400'
                                   : parseFloat(day.eligible_hours) > 0 ? 'text-amber-600 dark:text-amber-400'
                                     : 'text-slate-300 dark:text-slate-600'
                                   }`}>
@@ -271,34 +332,34 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                               </td>
 
                               {/* Attendance */}
-                              <td className="px-3 py-2 text-center">
-                                <span className={`text-[11px] px-2 py-1 rounded-full font-medium whitespace-nowrap ${getAttClass(day.attendance_status)}`}>
+                              <td className="px-3 py-2.5 text-center border-r border-slate-100 dark:border-slate-800">
+                                <span className={`text-[11px] px-2 py-0.5 rounded font-medium whitespace-nowrap ${getAttClass(day.attendance_status)}`}>
                                   {day.attendance_status}
                                 </span>
                               </td>
 
                               {/* LMS Leave */}
-                              <td className="px-3 py-2">
+                              <td className="px-3 py-2.5 border-r border-slate-100 dark:border-slate-800">
                                 <div className="flex flex-col gap-0.5">
                                   <span className="text-xs text-slate-600 dark:text-slate-300">{day.lms_leave_status}</span>
                                   {day.leave_type && day.leave_type !== '-' && (
-                                    <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-medium">({day.leave_type})</span>
+                                    <span className="text-[10px] text-slate-400">{day.leave_type}</span>
                                   )}
                                 </div>
                               </td>
 
                               {/* Paid/Unpaid */}
-                              <td className="px-3 py-2 text-center">
-                                <span className={`text-[11px] px-2 py-1 rounded-full font-medium whitespace-nowrap ${getPaidClass(day.paid_unpaid)}`}>
+                              <td className="px-3 py-2.5 text-center border-r border-slate-100 dark:border-slate-800">
+                                <span className={`text-[11px] px-2 py-0.5 rounded font-medium whitespace-nowrap ${getPaidClass(day.paid_unpaid)}`}>
                                   {day.paid_unpaid}
                                 </span>
                               </td>
 
                               {/* Deduction Reason */}
-                              <td className="px-3 py-2">
+                              <td className="px-3 py-2.5">
                                 {day.deduction_reason ? (
                                   <div className="flex items-center gap-1.5">
-                                    {day.sunday_sandwich && <AlertTriangle className="w-3 h-3 text-rose-500 flex-shrink-0" />}
+                                    {day.sunday_sandwich && <AlertTriangle className="w-3 h-3 text-red-500 flex-shrink-0" />}
                                     <span className="text-xs text-red-600 dark:text-red-400">{day.deduction_reason}</span>
                                   </div>
                                 ) : (
@@ -310,86 +371,74 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                         })}
                       </tbody>
                     </table>
-                  </div>
 
-                  {/* ── Salary Breakdown Panel ── */}
-                  {(() => {
-                    const monthlySalary = emp.ctc ? Math.round(emp.ctc / 12) : 0;
-                    const calDays = emp.days?.length || 30;
-                    const perDay = calDays > 0 ? monthlySalary / calDays : 0;
-                    const unpaidDays = emp.summary.unpaidDays || 0;
-                    const leaveDeduction = Math.round(perDay * unpaidDays);
-                    const punchMissingDays = emp.summary.punchMissing || 0;
-                    const punchDeduction = Math.round(perDay * punchMissingDays);
-                    const permExceededDays = emp.summary.permissionLimitExceededDays || 0;
-                    const permDeduction = Math.round(perDay * permExceededDays);
-                    const grossAfterLeave = Math.max(0, monthlySalary - leaveDeduction - punchDeduction - permDeduction);
-                    const pfDeduction = Math.round(Math.min(grossAfterLeave * 0.12, 1800));
-                    const esiDeduction = grossAfterLeave <= 21000 ? Math.round(grossAfterLeave * 0.0075) : 0;
-                    const netSalary = Math.max(0, grossAfterLeave - pfDeduction - esiDeduction);
-                    const fmt = (n: number) => '₹' + n.toLocaleString('en-IN');
-                    return (
-                      <div className="mx-4 mb-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-sm flex-shrink-0">
-                        <div className="px-4 py-2 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2">
-                          <span className="text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wider">💰 Salary Breakdown</span>
-                          <span className="text-[10px] text-slate-400">estimated from attendance data</span>
-                        </div>
-                        <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-y divide-slate-100 dark:divide-slate-800">
-                          <div className="px-4 py-3">
-                            <p className="text-[10px] text-slate-400 uppercase tracking-wide font-medium mb-0.5">Annual CTC</p>
-                            <p className="text-sm font-bold text-slate-800 dark:text-white">{fmt(emp.ctc || 0)}</p>
+                    {/* ── Salary Breakdown Panel ── */}
+                    {(() => {
+                      const monthlySalary = emp.ctc ? Math.round(emp.ctc / 12) : 0;
+                      const calDays = emp.days?.length || 30;
+                      const perDay = calDays > 0 ? monthlySalary / calDays : 0;
+                      
+                      const totalUnpaid = emp.summary.unpaidDays || 0;
+                      const punchMissingDays = emp.summary.punchMissing || 0;
+                      const sundayDeductions = emp.summary.sundayDeductions || 0;
+                      const lessThan9 = emp.summary.lessThan9 || 0;
+                      
+                      const nonLeaveDeductions = punchMissingDays + sundayDeductions + lessThan9;
+                      const unpaidLeaveDays = Math.max(0, totalUnpaid - nonLeaveDeductions);
+
+                      const leaveDeduction = Math.round(perDay * unpaidLeaveDays);
+                      const punchDeduction = Math.round(perDay * nonLeaveDeductions);
+                      const permExceededDays = emp.summary.permissionLimitExceededDays || 0;
+                      const permDeduction = Math.round(perDay * permExceededDays);
+                      const totalDeductions = leaveDeduction + punchDeduction + permDeduction;
+                      const netSalary = Math.max(0, monthlySalary - totalDeductions);
+                      const fmt = (n: number) => '₹' + n.toLocaleString('en-IN');
+                      return (
+                        <div className="mx-4 mt-5 mb-4 rounded-lg border border-slate-200 dark:border-slate-700">
+                          <div className="px-4 py-2.5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+                            <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">Estimated salary breakdown</span>
+                            <span className="text-[11px] text-slate-400">Based on attendance data</span>
                           </div>
-                          <div className="px-4 py-3">
-                            <p className="text-[10px] text-slate-400 uppercase tracking-wide font-medium mb-0.5">Monthly Salary</p>
-                            <p className="text-sm font-bold text-slate-800 dark:text-white">{fmt(monthlySalary)}</p>
-                          </div>
-                          <div className="px-4 py-3">
-                            <p className="text-[10px] text-slate-400 uppercase tracking-wide font-medium mb-0.5">Leave Deduction</p>
-                            <p className="text-sm font-bold text-red-500">{unpaidDays > 0 ? `-${fmt(leaveDeduction)}` : '₹0'}</p>
-                            <p className="text-[10px] text-slate-400 mt-0.5">{unpaidDays} unpaid day{unpaidDays !== 1 ? 's' : ''}</p>
-                          </div>
-                          <div className="px-4 py-3">
-                            <p className="text-[10px] text-slate-400 uppercase tracking-wide font-medium mb-0.5">Missing Punch Ded.</p>
-                            <p className="text-sm font-bold text-orange-500">{punchMissingDays > 0 ? `-${fmt(punchDeduction)}` : '₹0'}</p>
-                            <p className="text-[10px] text-slate-400 mt-0.5">{punchMissingDays} day{punchMissingDays !== 1 ? 's' : ''}</p>
-                          </div>
-                          <div className="px-4 py-3">
-                            <p className="text-[10px] text-slate-400 uppercase tracking-wide font-medium mb-0.5">Permission Ded.</p>
-                            <p className="text-sm font-bold text-fuchsia-500">{permExceededDays > 0 ? `-${fmt(permDeduction)}` : '₹0'}</p>
-                            <p className="text-[10px] text-slate-400 mt-0.5">{permExceededDays} exceeded day{permExceededDays !== 1 ? 's' : ''}</p>
-                          </div>
-                          <div className="px-4 py-3">
-                            <p className="text-[10px] text-slate-400 uppercase tracking-wide font-medium mb-0.5">PF (12%)</p>
-                            <p className="text-sm font-bold text-red-400">-{fmt(pfDeduction)}</p>
-                          </div>
-                          <div className="px-4 py-3">
-                            <p className="text-[10px] text-slate-400 uppercase tracking-wide font-medium mb-0.5">ESI (0.75%)</p>
-                            <p className="text-sm font-bold text-red-400">{esiDeduction > 0 ? `-${fmt(esiDeduction)}` : '₹0'}</p>
-                          </div>
-                          <div className="px-4 py-3 bg-emerald-50 dark:bg-emerald-900/20">
-                            <p className="text-[10px] text-emerald-600 dark:text-emerald-400 uppercase tracking-wide font-bold mb-0.5">Net Salary</p>
-                            <p className="text-base font-extrabold text-emerald-600 dark:text-emerald-400">{fmt(netSalary)}</p>
+                          <div className="grid grid-cols-2 sm:grid-cols-4">
+                            <div className="px-4 py-3 border-r border-b sm:border-b-0 border-slate-100 dark:border-slate-800">
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Monthly salary</p>
+                              <p className="text-sm font-semibold text-slate-900 dark:text-white tabular-nums">{fmt(monthlySalary)}</p>
+                            </div>
+                            <div className="px-4 py-3 border-b sm:border-b-0 sm:border-r border-slate-100 dark:border-slate-800">
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Leave deduction</p>
+                              <p className={`text-sm font-semibold tabular-nums ${unpaidLeaveDays > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-400'}`}>{unpaidLeaveDays > 0 ? `−${fmt(leaveDeduction)}` : '—'}</p>
+                              <p className="text-[11px] text-slate-400 mt-0.5">{unpaidLeaveDays} unpaid day{unpaidLeaveDays !== 1 ? 's' : ''}</p>
+                            </div>
+                            <div className="px-4 py-3 border-r border-slate-100 dark:border-slate-800">
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Punch / permission ded.</p>
+                              <p className={`text-sm font-semibold tabular-nums ${(punchDeduction + permDeduction) > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-400'}`}>{(punchDeduction + permDeduction) > 0 ? `−${fmt(punchDeduction + permDeduction)}` : '—'}</p>
+                              <p className="text-[11px] text-slate-400 mt-0.5">{punchMissingDays + permExceededDays} day{(punchMissingDays + permExceededDays) !== 1 ? 's' : ''} flagged</p>
+                            </div>
+                            <div className="px-4 py-3 bg-emerald-50/60 dark:bg-emerald-500/5">
+                              <p className="text-[11px] text-emerald-700 dark:text-emerald-400 font-medium mb-0.5">Estimated net salary</p>
+                              <p className="text-base font-bold text-emerald-700 dark:text-emerald-400 tabular-nums">{fmt(netSalary)}</p>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    );
-                  })()}
+                      );
+                    })()}
+                  </div>
 
                   {/* ── Employee navigation (if multiple) ── */}
                   {employees.length > 1 && (
-                    <div className="px-6 py-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between bg-white dark:bg-slate-900 flex-shrink-0">
+                    <div className="px-6 py-2.5 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between flex-shrink-0">
                       <button
                         onClick={() => setActiveEmpIdx(i => Math.max(0, i - 1))}
                         disabled={activeEmpIdx === 0}
-                        className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-indigo-600 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        className="flex items-center gap-1.5 text-[13px] font-medium text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                       >
                         <ChevronLeft className="w-4 h-4" /> Previous
                       </button>
-                      <span className="text-xs text-slate-400">{activeEmpIdx + 1} of {employees.length} employees</span>
+                      <span className="text-xs text-slate-400 tabular-nums">{activeEmpIdx + 1} of {employees.length} employees</span>
                       <button
                         onClick={() => setActiveEmpIdx(i => Math.min(employees.length - 1, i + 1))}
                         disabled={activeEmpIdx === employees.length - 1}
-                        className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-indigo-600 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        className="flex items-center gap-1.5 text-[13px] font-medium text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                       >
                         Next <ChevronRight className="w-4 h-4" />
                       </button>
@@ -402,14 +451,14 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
         </div>
 
         {/* ── Footer ── */}
-        <div className="px-6 py-4 border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 rounded-b-2xl flex justify-between items-center flex-shrink-0">
-          <p className="text-xs text-slate-400 dark:text-slate-500">
+        <div className="px-6 py-3.5 border-t border-slate-200 dark:border-slate-700 flex justify-between items-center flex-shrink-0">
+          <p className="text-xs text-slate-500 dark:text-slate-400">
             {loading ? 'Loading…' : `${employees.length} employee${employees.length !== 1 ? 's' : ''} · ${MONTH_NAMES[month - 1]} ${year}`}
           </p>
-          <div className="flex gap-3">
+          <div className="flex gap-2.5">
             <button
               onClick={onClose}
-              className="px-5 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 dark:bg-slate-800 dark:text-slate-200 dark:border-slate-600 dark:hover:bg-slate-700 transition-colors"
+              className="px-4 py-2 text-[13px] font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 dark:bg-slate-800 dark:text-slate-200 dark:border-slate-600 dark:hover:bg-slate-700 transition-colors"
             >
               {viewOnly ? 'Close' : 'Cancel'}
             </button>
@@ -417,10 +466,10 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
               <button
                 onClick={() => onConfirm(data)}
                 disabled={loading || employees.length === 0}
-                className="flex items-center gap-2 px-6 py-2 text-sm font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                className="flex items-center gap-2 px-4 py-2 text-[13px] font-semibold text-white bg-indigo-600 rounded-md hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 <Check className="w-4 h-4" />
-                Confirm &amp; Generate Payroll
+                Confirm and generate payroll
               </button>
             )}
           </div>

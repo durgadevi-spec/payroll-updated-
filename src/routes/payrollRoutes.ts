@@ -934,7 +934,7 @@ router.post('/payroll/generation-preview', async (req, res) => {
     if (lmsClient) {
       for (const emp of employees) {
         const leaveQuery = `
-          SELECT TO_CHAR(d::date, 'YYYY-MM-DD') AS leave_date, l.leave_type, l.leave_duration_type
+          SELECT TO_CHAR(d::date, 'YYYY-MM-DD') AS leave_date, l.leave_type, l.leave_duration_type, l.comp_off_uncovered_dates, l.comp_off_covered_days
           FROM leaves l
           LEFT JOIN employees e ON e.employee_code = l.user_id
           CROSS JOIN LATERAL (
@@ -951,8 +951,30 @@ router.post('/payroll/generation-preview', async (req, res) => {
         for (const row of lRes.rows) {
           // leave_date is already 'YYYY-MM-DD' string from TO_CHAR — use directly, no Date conversion
           const dStr = row.leave_date as string;
-          const isPaid = ['pl', 'sl', 'el', 'cl', 'sick', 'casual', 'earned', 'privilege', 'sick leave', 'casual leave', 'earned leave', 'privilege leave'].includes((row.leave_type || '').trim().toLowerCase());
-          empLeaves.set(dStr, { type: row.leave_type || 'Unknown', isPaid, duration: row.leave_duration_type });
+          const isCompOff = (row.leave_type || '').trim().toLowerCase() === 'comp off';
+          let isPaid = ['pl', 'sl', 'el', 'cl', 'sick', 'casual', 'earned', 'privilege', 'sick leave', 'casual leave', 'earned leave', 'privilege leave'].includes((row.leave_type || '').trim().toLowerCase());
+          
+          if (isCompOff) {
+            const coveredDays = parseFloat(row.comp_off_covered_days || '0');
+            if (row.comp_off_uncovered_dates) {
+              const uncoveredDates = row.comp_off_uncovered_dates.split(',').map((s: string) => s.trim());
+              if (!uncoveredDates.includes(dStr)) {
+                isPaid = true; // It's covered by balance! No deduction.
+              }
+            } else if (coveredDays > 0) {
+              // Legacy data: has covered days but no explicit uncovered_dates string. Assume covered to be safe.
+              isPaid = true;
+            }
+            // If coveredDays === 0 and uncovered_dates is null, it remains isPaid = false (fully uncovered).
+            console.log(`[DEBUG COMP OFF] Date: ${dStr}, coveredDays: ${coveredDays}, uncovered_dates: ${row.comp_off_uncovered_dates}, isPaid: ${isPaid}`);
+          }
+
+          empLeaves.set(dStr, { 
+            type: row.leave_type || 'Unknown', 
+            isPaid, 
+            duration: row.leave_duration_type,
+            isCompOffUncovered: isCompOff && !isPaid
+          });
         }
         lmsLeaves.set(emp.id, empLeaves);
       }
@@ -1030,13 +1052,13 @@ router.post('/payroll/generation-preview', async (req, res) => {
     const attendance = new Map<string, Map<string, any>>(); // employee_id -> date -> { in, out, hours }
     const attRes = await pClient.query(
       `SELECT emp_code,
-        TO_CHAR(punch_time AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') as att_date,
+        TO_CHAR(punch_time, 'YYYY-MM-DD') as att_date,
         MIN(punch_time) as first_punch,
         MAX(punch_time) as last_punch
        FROM attendance_logs
-       WHERE punch_time >= $1 AND punch_time < $2
-       GROUP BY emp_code, TO_CHAR(punch_time AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD')`,
-      [startDate.toISOString(), new Date(year, month, 1).toISOString()]
+       WHERE punch_time >= $1::timestamp AND punch_time < $2::timestamp
+       GROUP BY emp_code, TO_CHAR(punch_time, 'YYYY-MM-DD')`,
+      [`${year}-${String(month).padStart(2, '0')}-01`, `${year + Math.floor(month/12)}-${String((month % 12) + 1).padStart(2, '0')}-01`]
     );
 
     // Map emp_code back to employee_id (att_date is already YYYY-MM-DD string from TO_CHAR)
@@ -1130,6 +1152,15 @@ router.post('/payroll/generation-preview', async (req, res) => {
           // Full Day Leave
           if (leave.type.toLowerCase() === 'od') {
             paidUnpaid = 'Paid (OD)';
+          } else if (leave.type.toLowerCase() === 'comp off') {
+            if (leave.isCompOffUncovered) {
+              lmsStatus = 'Approved (No Balance)';
+              paidUnpaid = 'Unpaid Leave (Comp Off)';
+              isDeductible = true;
+              dedReason = 'Comp off applied but no comp off stored for you, so deducted';
+            } else {
+              paidUnpaid = 'Paid Leave (Comp Off)';
+            }
           } else {
             if (paSlaBalance >= 1) {
               paSlaBalance -= 1;
@@ -1313,7 +1344,9 @@ router.post('/payroll-items/external-data', async (req, res) => {
             SELECT 
               d::date AS leave_date,
               l.leave_type,
-              l.leave_duration_type
+              l.leave_duration_type,
+              l.comp_off_uncovered_dates,
+              l.comp_off_covered_days
             FROM leaves l
             LEFT JOIN employees e ON e.employee_code = l.user_id
             CROSS JOIN LATERAL (
@@ -1353,8 +1386,19 @@ router.post('/payroll-items/external-data', async (req, res) => {
               if (row.leave_type === 'OD') {
                 // Paid leaves: no salary deduction, but still overlaps with TS missing to exclude
                 odDates.push(d);
+              } else if ((row.leave_type || '').trim().toLowerCase() === 'comp off') {
+                const coveredDays = parseFloat(row.comp_off_covered_days || '0');
+                if (row.comp_off_uncovered_dates) {
+                  const uncoveredDates = row.comp_off_uncovered_dates.split(',').map((s: string) => s.trim());
+                  if (uncoveredDates.includes(d)) {
+                    unpaidCount += dayValue;
+                  }
+                } else if (coveredDays === 0) {
+                  // completely uncovered!
+                  unpaidCount += dayValue;
+                }
               } else {
-                // All other leave types (Casual, Sick, LWP, Comp Off, Earned) = unpaid
+                // All other leave types (Casual, Sick, LWP, Earned) = unpaid
                 unpaidCount += dayValue;
               }
             }
@@ -1732,7 +1776,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
 
     const itemsResult = await payrollClient.query(
       `SELECT pi.*, e.id AS employee_id, e.name AS employee_name, e.email AS employee_email, e.designation AS employee_designation, e.department AS employee_department, e.bank_account AS employee_bank_account, e.pf_number AS employee_pf_number, e.uan_number AS employee_uan_number
-       , e.employee_code AS employee_code
+       , e.employee_code AS employee_code, e.ctc AS employee_ctc
        FROM payroll_items pi
        JOIN employees e ON e.id = pi.employee_id
        WHERE pi.payroll_id = $1`,
@@ -1772,7 +1816,9 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
             SELECT 
               d::date AS leave_date,
               l.leave_type,
-              l.leave_duration_type
+              l.leave_duration_type,
+              l.comp_off_uncovered_dates,
+              l.comp_off_covered_days
             FROM leaves l
             LEFT JOIN employees e ON e.employee_code = l.user_id
             CROSS JOIN LATERAL (
@@ -1798,6 +1844,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
           if (leaveRes.rows.length > 0) {
             const allLeaveDates: string[] = [];
             const odDates: string[] = [];
+            const halfDayLeaveDates: string[] = [];
             let unpaidCount = 0;
             let totalCount = 0;
             const leaveTypeSummary: string[] = [];
@@ -1808,8 +1855,21 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
               allLeaveDates.push(d);
               totalCount += dayValue;
               leaveTypeSummary.push(row.leave_type);
+              if (row.leave_duration_type === 'Half Day') {
+                halfDayLeaveDates.push(d);
+              }
               if (row.leave_type === 'OD') {
                 odDates.push(d);
+              } else if ((row.leave_type || '').trim().toLowerCase() === 'comp off') {
+                const coveredDays = parseFloat(row.comp_off_covered_days || '0');
+                if (row.comp_off_uncovered_dates) {
+                  const uncoveredDates = row.comp_off_uncovered_dates.split(',').map((s: string) => s.trim());
+                  if (uncoveredDates.includes(d)) {
+                    unpaidCount += dayValue;
+                  }
+                } else if (coveredDays === 0) {
+                  unpaidCount += dayValue;
+                }
               } else {
                 unpaidCount += dayValue;
               }
@@ -1817,14 +1877,33 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
 
             const uniqueAllLeaveDates = [...new Set(allLeaveDates)];
             const primaryLeaveType = leaveTypeSummary.find(t => t !== 'OD') || leaveTypeSummary[0] || 'Leave';
-            console.log(`[ANALYSIS] LMS Match for ${item.employee_name}: ${totalCount} total, ${unpaidCount} unpaid (excl OD), ${odDates.length} OD dates`);
+            const uncoveredCompOffDates: string[] = [];
+            
+            for (const row of leaveRes.rows) {
+              const d = toLocalDateStr(row.leave_date);
+              if ((row.leave_type || '').trim().toLowerCase() === 'comp off') {
+                const coveredDays = parseFloat(row.comp_off_covered_days || '0');
+                if (row.comp_off_uncovered_dates) {
+                  const uncoveredDates = row.comp_off_uncovered_dates.split(',').map((s: string) => s.trim());
+                  if (uncoveredDates.includes(d)) {
+                    uncoveredCompOffDates.push(d);
+                  }
+                } else if (coveredDays === 0) {
+                  uncoveredCompOffDates.push(d);
+                }
+              }
+            }
+
+            console.log(`[ANALYSIS] LMS Match for ${item.employee_name}: ${totalCount} total, ${unpaidCount} unpaid (excl OD), ${odDates.length} OD dates, ${halfDayLeaveDates.length} half-day`);
             leaveData = {
               unpaid_leaves: unpaidCount,
               total_leaves: totalCount,
               leave_type: primaryLeaveType,
               leave_dates: uniqueAllLeaveDates,
               od_dates: odDates,
+              half_day_leave_dates: halfDayLeaveDates,
               permission_hours: 0,
+              comp_off_uncovered_dates: uncoveredCompOffDates,
             } as any;
           }
 
@@ -2005,34 +2084,54 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       let missingPunchDeduction = 0;
       const missingPunchDates: string[] = [];
       const coveredByLeaveDates: string[] = []; // Missing punch days covered by approved leave
+      const fullyPunchedDatesSet = new Set();
+      const incompletePunchedDatesSet = new Set<string>();
+      const incompletePunchTimes: Record<string, string> = {};
+      let sandwichDeductedDays = 0;
+      let sandwichDeductionAmount = 0;
+      const sandwichDates: string[] = [];
 
       if (empCode) {
         try {
           // Get all dates this employee has attendance records for
           const attRes = await payrollClient.query(
-            `SELECT DISTINCT TO_CHAR(punch_time AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') as att_date
+            `SELECT 
+               TO_CHAR(punch_time, 'YYYY-MM-DD') as att_date,
+               MIN(punch_time) as first_punch,
+               MAX(punch_time) as last_punch
              FROM attendance_logs
              WHERE UPPER(emp_code) = UPPER($1)
-               AND EXTRACT(MONTH FROM punch_time AT TIME ZONE 'Asia/Kolkata') = $2
-               AND EXTRACT(YEAR FROM punch_time AT TIME ZONE 'Asia/Kolkata') = $3`,
+               AND EXTRACT(MONTH FROM punch_time) = $2
+               AND EXTRACT(YEAR FROM punch_time) = $3
+             GROUP BY TO_CHAR(punch_time, 'YYYY-MM-DD')`,
             [empCode, payroll.month, payroll.year]
           );
-          const punchedDatesSet = new Set(attRes.rows.map((r: any) => r.att_date));
+          
+          attRes.rows.forEach((r: any) => {
+            const pIn = new Date(r.first_punch);
+            const pOut = new Date(r.last_punch);
+            if (pIn.getTime() === pOut.getTime()) {
+              incompletePunchedDatesSet.add(r.att_date);
+              incompletePunchTimes[r.att_date] = pIn.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+            } else {
+              fullyPunchedDatesSet.add(r.att_date);
+            }
+          });
 
-          // Find working days with NO punch at all
+          // Find working days with NO punch or INCOMPLETE punch
           for (let d = 1; d <= calendarDays; d++) {
             const dt = new Date(payroll.year, payroll.month - 1, d);
             const dstr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
             if (dt.getDay() === 0) continue; // Skip Sunday
             if (holidaySet.has(dstr)) continue; // Skip holidays
-            if (punchedDatesSet.has(dstr)) continue; // Has punch, skip
+            if (fullyPunchedDatesSet.has(dstr)) continue; // Has full punch, skip
 
-            // This day has NO punch at all - check if covered by LMS approved leave
+            // This day has NO full punch (either no punch or incomplete punch)
             if (leaveDateSet.has(dstr)) {
               // Covered by approved leave - no deduction
               coveredByLeaveDates.push(dstr);
             } else {
-              // No punch AND no leave - this is a deductible missing punch day
+              // No full punch AND no leave - this is a deductible missing punch day
               missingPunchDates.push(dstr);
             }
           }
@@ -2040,6 +2139,25 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
           missingPunchDays = missingPunchDates.length;
           const perDaySalary = (monthlySalary || 0) / (calendarDays || 30);
           missingPunchDeduction = Math.round(perDaySalary * missingPunchDays * 100) / 100;
+
+          // Sandwich Deduction: if Saturday and Monday have NO punches, deduct Sunday
+          for (let d = 2; d <= calendarDays - 1; d++) {
+            const dt = new Date(payroll.year, payroll.month - 1, d);
+            if (dt.getDay() === 0) { // Sunday
+              const satStr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d - 1).padStart(2, '0')}`;
+              const monStr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d + 1).padStart(2, '0')}`;
+              
+              const satNoPunch = !fullyPunchedDatesSet.has(satStr) && !incompletePunchedDatesSet.has(satStr);
+              const monNoPunch = !fullyPunchedDatesSet.has(monStr) && !incompletePunchedDatesSet.has(monStr);
+              
+              if (satNoPunch && monNoPunch) {
+                const sunStr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                sandwichDates.push(sunStr);
+              }
+            }
+          }
+          sandwichDeductedDays = sandwichDates.length;
+          sandwichDeductionAmount = Math.round(perDaySalary * sandwichDeductedDays * 100) / 100;
 
           if (missingPunchDays > 0) {
             console.log(`[ANALYSIS] ⚠️ ${item.employee_name}: ${missingPunchDays} days with missing punches (no LMS leave). Deduction: ${missingPunchDeduction}`);
@@ -2055,7 +2173,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       const sundayEarnings = Math.round(((monthlySalary || 0) / (calendarDays || 30)) * (Number(item.sunday_work_days) || 0) * 100) / 100;
       const netSalary = Math.max(
         0,
-        Math.round((monthlySalary - leaveDeduction - timesheetDeduction - missingPunchDeduction - permissionDeduction - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction + bonus + sundayEarnings) * 100) / 100
+        Math.round((monthlySalary - leaveDeduction - timesheetDeduction - missingPunchDeduction - sandwichDeductionAmount - permissionDeduction - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction + bonus + sundayEarnings) * 100) / 100
       );
 
       enriched.push({
@@ -2069,12 +2187,16 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
           bank_account: item.employee_bank_account,
           pf_number: item.employee_pf_number,
           uan_number: item.employee_uan_number,
+          employee_code: (item as any).employee_code,
+          ctc: (item as any).employee_ctc,
         },
         unpaid_leaves: leaveData?.unpaid_leaves ?? item.unpaid_leaves,
         leave_source: leaveData ? `LMS (${(leaveData as any).leave_type})` : 'No LMS leave record',
         leave_type: (leaveData as any)?.leave_type ?? null,
         od_dates: (leaveData as any)?.od_dates ?? [],
+        half_day_leave_dates: (leaveData as any)?.half_day_leave_dates ?? [],
         leave_matched_ts_dates: leaveData?.leave_dates ?? [],
+        uncovered_comp_off_dates: (leaveData as any)?.comp_off_uncovered_dates ?? [],
         missing_timesheets: actualMissingTsDays,
         missing_dates: actualMissingDates,
         leave_matched_ts_days: leaveMatchedTsDays,
@@ -2082,7 +2204,12 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
         missing_punches: missingPunchDays,
         missing_punch_deduction: missingPunchDeduction,
         missing_punch_dates: missingPunchDates,
+        incomplete_punch_dates: Array.from(incompletePunchedDatesSet),
+        incomplete_punch_times: incompletePunchTimes,
         covered_by_leave_dates: coveredByLeaveDates,
+        sandwich_deducted_days: sandwichDeductedDays,
+        sandwich_deduction_amount: sandwichDeductionAmount,
+        sandwich_dates: sandwichDates,
         permission_hours: permissionHours,
         permission_deduction: permissionDeduction,
         net_salary: netSalary,
