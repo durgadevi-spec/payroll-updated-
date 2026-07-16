@@ -3,6 +3,7 @@ import { Pool, Client } from 'pg';
 import * as dotenv from 'dotenv';
 import ZKLib from 'node-zklib';
 import { sendEmail } from './emailRoutes';
+import { calculatePayroll } from '../lib/payrollCalculator';
 
 dotenv.config({ path: './.env' });
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -192,6 +193,41 @@ router.get('/payroll-processing', async (req, res) => {
     const empRes = await pClient.query('SELECT id, name, email, designation, department, employee_code, ctc FROM employees WHERE status = \'active\'');
     const employees = empRes.rows;
 
+    // 1b. Fetch payroll settings (PF/ESI/Tax) and active advances so the projected salary
+    // here matches the real Payroll page math exactly (approved leaves = no deduction, only
+    // unpaid leaves/missing punches/sandwich Sundays are deducted, plus PF/ESI/Tax/Advance
+    // deductions applied the same way).
+    const settingsRes = await pClient.query('SELECT key, value FROM settings');
+    const settingsMap = Object.fromEntries(settingsRes.rows.map((s: any) => [s.key, s.value || '']));
+    const pfRate = parseFloat(settingsMap.pf_rate || '12');
+    const esiRate = parseFloat(settingsMap.esi_rate || '0.75');
+    const esiLimit = parseFloat(settingsMap.esi_limit || '21000');
+    const taxRate = parseFloat(settingsMap.tax_rate || '10');
+
+    const advancesRes = await pClient.query(
+      `SELECT employee_id, installment_amount, balance, status, repayment_type
+       FROM advances WHERE status = 'Active' AND balance > 0`
+    );
+    const advanceByEmp = new Map<string, number>();
+    advancesRes.rows.forEach((adv: any) => {
+      const inst = parseFloat(adv.installment_amount || 0);
+      const bal = parseFloat(adv.balance || 0);
+      const deduction = (adv.repayment_type === 'One-time' || inst === 0) ? bal : Math.min(inst, bal);
+      if (deduction > 0) {
+        advanceByEmp.set(adv.employee_id, (advanceByEmp.get(adv.employee_id) || 0) + deduction);
+      }
+    });
+
+    // 1c. Get the same paid/unpaid day breakdown used by the Payroll page's generation preview
+    // (approved leaves are paid/no-deduction there; only true unpaid days reduce salary).
+    let previewSummaryMap = new Map<string, any>();
+    try {
+      const previewResult: any = await computePayrollPreviewData(employees.map((e: any) => e.id), Number(month), Number(year));
+      (previewResult?.employees || []).forEach((e: any) => previewSummaryMap.set(e.id, e.summary));
+    } catch (previewErr) {
+      console.error('Error computing payroll preview summary for dashboard:', previewErr);
+    }
+
     // 2. Fetch current status from payslips
     const payslipRes = await pClient.query(
       `SELECT employee_id, ps.status, hold_reason 
@@ -343,27 +379,33 @@ router.get('/payroll-processing', async (req, res) => {
       if (tClient && code) {
         try {
           const tsRes = await tClient.query(
-            `SELECT total_hours 
+            `SELECT TO_CHAR(CAST(date AS date), 'YYYY-MM-DD') as date_str, total_hours 
              FROM time_entries 
-             WHERE employee_code = $1 AND CAST(date AS date) >= $2 AND CAST(date AS date) <= $3`,
+             WHERE employee_code = $1 AND CAST(date AS date) >= $2 AND CAST(date AS date) <= $3
+               AND LOWER(status) NOT IN ('draft', 'rejected')`,
             [code, startDateStr, endDateStr]
           );
 
-          let totalMinutes = 0;
+          // Group by distinct date first — some employees have more than one time_entries
+          // row for the same date (duplicate/resynced submissions), which was previously
+          // counted as multiple "recorded days" and could hide real missing days.
+          const minutesByDate = new Map<string, number>();
           tsRes.rows.forEach((r: any) => {
             const hMatch = (r.total_hours || '').match(/(\d+)h/);
             const mMatch = (r.total_hours || '').match(/(\d+)m/);
-            let mins = (hMatch ? parseInt(hMatch[1]) * 60 : 0) + (mMatch ? parseInt(mMatch[1]) : 0);
+            const mins = (hMatch ? parseInt(hMatch[1]) * 60 : 0) + (mMatch ? parseInt(mMatch[1]) : 0);
+            minutesByDate.set(r.date_str, (minutesByDate.get(r.date_str) || 0) + mins);
+          });
 
+          let totalMinutes = 0;
+          minutesByDate.forEach((mins) => {
             // Standard cap: 8 hours work (1 hr break already deducted or excluded)
             // Capping at 8 hours (480 mins) per day unless OT is implemented
-            if (mins > 480) mins = 480;
-
-            totalMinutes += mins;
+            totalMinutes += Math.min(mins, 480);
           });
 
           totalHours = totalMinutes / 60;
-          recordedDays = tsRes.rows.length;
+          recordedDays = minutesByDate.size;
         } catch (e) {
           console.error(`Error fetching TS for ${code}:`, e);
         }
@@ -375,13 +417,48 @@ router.get('/payroll-processing', async (req, res) => {
       const biometricDays = bioMap.get(code) || 0;
       const missingDays = Math.max(0, expectedDays - recordedDays);
 
-      // Salary Calculation
+      // Salary Calculation — mirrors the Payroll page exactly: approved leaves are paid
+      // (no deduction), only unpaid leaves / missing punches / sandwich Sundays reduce pay,
+      // and PF/ESI/Tax/Advance deductions are applied the same way.
       const monthlySalary = (Number(emp.ctc || 0) / 12);
       const calendarDays = new Date(Number(year), Number(month), 0).getDate();
-      const dayRate = monthlySalary / calendarDays;
 
-      // Basic Net Calculation (Monthly Salary - (Missing Days * Day Rate) - (Leave Days * Day Rate))
-      const projectedNetSalary = Math.max(0, monthlySalary - (missingDays * dayRate) - (leaveDays * dayRate));
+      const summary = previewSummaryMap.get(emp.id);
+      let projectedNetSalary: number;
+
+      if (summary) {
+        const totalUnpaid = summary.unpaidDays || 0;
+        const punchMissing = summary.punchMissing || 0;
+        const sundayDeductions = summary.sundayDeductions || 0;
+        const lessThan9 = summary.lessThan9 || 0;
+        const nonLeaveDeductions = punchMissing + sundayDeductions + lessThan9;
+        const unpaidLeaves = Math.max(0, totalUnpaid - nonLeaveDeductions);
+        const effectiveMissingPunches = punchMissing + lessThan9;
+        const advanceDeduction = advanceByEmp.get(emp.id) || 0;
+
+        const calc = calculatePayroll({
+          monthlySalary,
+          workingDays: calendarDays,
+          calendarDays,
+          unpaidLeaves,
+          missingTimesheets: 0,
+          missingPunches: effectiveMissingPunches,
+          bonus: 0,
+          pfRate,
+          esiRate,
+          esiLimit,
+          taxRate,
+          loanDeduction: 0,
+          advanceDeduction,
+          sundayDeductions
+        });
+        projectedNetSalary = calc.netSalary;
+      } else {
+        // Fallback if the preview data couldn't be computed (e.g. LMS unavailable) —
+        // same simple fallback as before, so the panel never breaks.
+        const dayRate = monthlySalary / calendarDays;
+        projectedNetSalary = Math.max(0, monthlySalary - (missingDays * dayRate) - (leaveDays * dayRate));
+      }
 
       return {
         ...emp,
@@ -888,12 +965,11 @@ router.get('/diagnose-lms', async (req, res) => {
 });
 
 
-router.post('/payroll/generation-preview', async (req, res) => {
-  const { employeeIds, month, year } = req.body;
-  if (!employeeIds || !month || !year) {
-    return res.status(400).json({ error: 'Missing required fields' });
-  }
-
+// Reusable attendance/leave summary computation — this is the single source of truth for
+// "paid vs unpaid" day classification (approved leaves = no deduction, etc.). Used by both
+// the /payroll/generation-preview endpoint (Payroll page) and /payroll-processing endpoint
+// (Admin Panel dashboard) so both surfaces agree on the same numbers.
+async function computePayrollPreviewData(employeeIds: string[], month: number, year: number) {
   let pClient, lmsClient, tsClient;
   try {
     pClient = await payrollPool.connect();
@@ -953,7 +1029,7 @@ router.post('/payroll/generation-preview', async (req, res) => {
           const dStr = row.leave_date as string;
           const isCompOff = (row.leave_type || '').trim().toLowerCase() === 'comp off';
           let isPaid = ['pl', 'sl', 'el', 'cl', 'sick', 'casual', 'earned', 'privilege', 'sick leave', 'casual leave', 'earned leave', 'privilege leave'].includes((row.leave_type || '').trim().toLowerCase());
-          
+
           if (isCompOff) {
             const coveredDays = parseFloat(row.comp_off_covered_days || '0');
             if (row.comp_off_uncovered_dates) {
@@ -969,9 +1045,9 @@ router.post('/payroll/generation-preview', async (req, res) => {
             console.log(`[DEBUG COMP OFF] Date: ${dStr}, coveredDays: ${coveredDays}, uncovered_dates: ${row.comp_off_uncovered_dates}, isPaid: ${isPaid}`);
           }
 
-          empLeaves.set(dStr, { 
-            type: row.leave_type || 'Unknown', 
-            isPaid, 
+          empLeaves.set(dStr, {
+            type: row.leave_type || 'Unknown',
+            isPaid,
             duration: row.leave_duration_type,
             isCompOffUncovered: isCompOff && !isPaid
           });
@@ -1058,7 +1134,7 @@ router.post('/payroll/generation-preview', async (req, res) => {
        FROM attendance_logs
        WHERE punch_time >= $1::timestamp AND punch_time < $2::timestamp
        GROUP BY emp_code, TO_CHAR(punch_time, 'YYYY-MM-DD')`,
-      [`${year}-${String(month).padStart(2, '0')}-01`, `${year + Math.floor(month/12)}-${String((month % 12) + 1).padStart(2, '0')}-01`]
+      [`${year}-${String(month).padStart(2, '0')}-01`, `${year + Math.floor(month / 12)}-${String((month % 12) + 1).padStart(2, '0')}-01`]
     );
 
     // Map emp_code back to employee_id (att_date is already YYYY-MM-DD string from TO_CHAR)
@@ -1291,14 +1367,25 @@ router.post('/payroll/generation-preview', async (req, res) => {
       result.employees.push(empData);
     }
 
-    res.json(result);
-  } catch (error) {
-    console.error('Error generating payroll preview:', error);
-    res.status(500).json({ error: 'Failed to generate payroll preview' });
+    return result;
   } finally {
     if (pClient) pClient.release();
     if (lmsClient) lmsClient.release();
     if (tsClient) tsClient.release();
+  }
+}
+
+router.post('/payroll/generation-preview', async (req, res) => {
+  const { employeeIds, month, year } = req.body;
+  if (!employeeIds || !month || !year) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+  try {
+    const result = await computePayrollPreviewData(employeeIds, month, year);
+    res.json(result);
+  } catch (error) {
+    console.error('Error generating payroll preview:', error);
+    res.status(500).json({ error: 'Failed to generate payroll preview' });
   }
 });
 
@@ -1721,15 +1808,43 @@ router.post('/attendance', async (req, res) => {
 });
 
 // GET attendance logs from database (what the Attendance page uses)
+// Supports optional ?from=YYYY-MM-DD&to=YYYY-MM-DD&emp_code=E0048 filtering so the
+// query only pulls the punches actually needed, instead of always returning just the
+// most recent 200 rows company-wide (which silently hid older records behind the
+// frontend's date filters).
 router.get('/attendance/logs', async (req, res) => {
   let client;
   try {
     client = await payrollPool.connect();
 
-    const limit = Number(req.query.limit || '200');
+    const { from, to, emp_code } = req.query as { from?: string; to?: string; emp_code?: string };
+    // Raised the default cap substantially since we now filter by date range/employee
+    // in SQL; callers that truly want the old "just the latest N" behavior can still
+    // pass ?limit=200 explicitly.
+    const limit = Number(req.query.limit || '20000');
+
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (from) {
+      params.push(`${from} 00:00:00`);
+      conditions.push(`punch_time >= $${params.length}`);
+    }
+    if (to) {
+      params.push(`${to} 23:59:59`);
+      conditions.push(`punch_time <= $${params.length}`);
+    }
+    if (emp_code && emp_code !== 'all') {
+      params.push(emp_code);
+      conditions.push(`emp_code = $${params.length}`);
+    }
+
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    params.push(limit);
+
     const result = await client.query(
-      `SELECT * FROM attendance_logs ORDER BY punch_time DESC LIMIT $1`,
-      [limit]
+      `SELECT * FROM attendance_logs ${whereClause} ORDER BY punch_time DESC LIMIT $${params.length}`,
+      params
     );
 
     res.json(result.rows);
@@ -1738,6 +1853,102 @@ router.get('/attendance/logs', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch attendance logs' });
   } finally {
     if (client) client.release();
+  }
+});
+
+// GET the distinct list of employee codes that have punches within a date range.
+// Deliberately ignores any emp_code filter — used to populate the Employee dropdown
+// on the Attendance page, so once you pick a specific employee the dropdown still
+// shows every other employee (instead of collapsing to just the selected one,
+// which happened when the dropdown was built from the already-filtered logs list).
+router.get('/attendance/employees', async (req, res) => {
+  let client;
+  try {
+    client = await payrollPool.connect();
+
+    const { from, to } = req.query as { from?: string; to?: string };
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (from) {
+      params.push(`${from} 00:00:00`);
+      conditions.push(`punch_time >= $${params.length}`);
+    }
+    if (to) {
+      params.push(`${to} 23:59:59`);
+      conditions.push(`punch_time <= $${params.length}`);
+    }
+
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const result = await client.query(
+      `SELECT DISTINCT emp_code FROM attendance_logs ${whereClause} ORDER BY emp_code`,
+      params
+    );
+
+    res.json(result.rows.map((r: any) => r.emp_code));
+  } catch (error) {
+    console.error('Error fetching employee codes:', error);
+    res.status(500).json({ error: 'Failed to fetch employee codes' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// GET approved leave dates from the LMS database for the given range/employee.
+// Used by the Attendance page to distinguish a genuinely missing punch from a day
+// the employee was on approved leave, so it can show "On Leave" instead of just
+// "Missing Punch"/"Incomplete".
+router.get('/attendance/leaves', async (req, res) => {
+  if (!lmsPool) {
+    // LMS not configured in this environment — return an empty list rather than
+    // erroring, so the Attendance page still works (just without leave cross-check).
+    return res.json([]);
+  }
+
+  let lmsClient;
+  try {
+    lmsClient = await lmsPool.connect();
+
+    const { from, to, emp_code } = req.query as { from?: string; to?: string; emp_code?: string };
+
+    const conditions: string[] = [`LOWER(l.status) = 'approved'`];
+    const params: any[] = [];
+
+    if (from) {
+      params.push(from);
+      conditions.push(`d::date >= $${params.length}::date`);
+    }
+    if (to) {
+      params.push(to);
+      conditions.push(`d::date <= $${params.length}::date`);
+    }
+    if (emp_code && emp_code !== 'all') {
+      params.push(emp_code);
+      conditions.push(`UPPER(TRIM(l.user_id)) = UPPER(TRIM($${params.length}))`);
+    }
+
+    const query = `
+      SELECT
+        UPPER(TRIM(l.user_id)) AS emp_code,
+        d::date AS leave_date,
+        l.leave_type,
+        l.leave_duration_type
+      FROM leaves l
+      CROSS JOIN LATERAL (
+        SELECT generate_series(CAST(l.start_date AS date), CAST(l.end_date AS date), '1 day'::interval)::date AS d
+      ) dates
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY d
+    `;
+
+    const result = await lmsClient.query(query, params);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching leave dates from LMS:', error);
+    res.status(500).json({ error: 'Failed to fetch leave dates' });
+  } finally {
+    if (lmsClient) lmsClient.release();
   }
 });
 
@@ -1878,7 +2089,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
             const uniqueAllLeaveDates = [...new Set(allLeaveDates)];
             const primaryLeaveType = leaveTypeSummary.find(t => t !== 'OD') || leaveTypeSummary[0] || 'Leave';
             const uncoveredCompOffDates: string[] = [];
-            
+
             for (const row of leaveRes.rows) {
               const d = toLocalDateStr(row.leave_date);
               if ((row.leave_type || '').trim().toLowerCase() === 'comp off') {
@@ -2106,7 +2317,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
              GROUP BY TO_CHAR(punch_time, 'YYYY-MM-DD')`,
             [empCode, payroll.month, payroll.year]
           );
-          
+
           attRes.rows.forEach((r: any) => {
             const pIn = new Date(r.first_punch);
             const pOut = new Date(r.last_punch);
@@ -2146,10 +2357,10 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
             if (dt.getDay() === 0) { // Sunday
               const satStr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d - 1).padStart(2, '0')}`;
               const monStr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d + 1).padStart(2, '0')}`;
-              
+
               const satNoPunch = !fullyPunchedDatesSet.has(satStr) && !incompletePunchedDatesSet.has(satStr);
               const monNoPunch = !fullyPunchedDatesSet.has(monStr) && !incompletePunchedDatesSet.has(monStr);
-              
+
               if (satNoPunch && monNoPunch) {
                 const sunStr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
                 sandwichDates.push(sunStr);
