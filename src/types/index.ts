@@ -57,6 +57,10 @@ export interface PayrollItem {
   holiday_dates?: string[];
   calculation_type?: 'monthly' | 'custom' | 'working_days';
   calculation_days?: number;
+  permission_hours?: number;
+  permission_deduction?: number;
+  hourly_short_hours?: number;
+  hourly_deduction?: number;
   created_at: string;
   employee?: Employee;
 }

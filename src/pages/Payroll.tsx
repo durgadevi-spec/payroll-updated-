@@ -75,10 +75,11 @@ const getNetSalary = (item: PayrollItemWithEmployee) => {
   const advanceDeduction = safeNumber(item.advance_deduction, 0);
   const permissionDeduction = safeNumber((item as any).permission_deduction, 0);
   const sandwichDeduction = safeNumber((item as any).sandwich_deduction_amount, 0);
+  const hourlyDeduction = safeNumber((item as any).hourly_deduction, 0);
   const bonus = safeNumber(item.bonus, 0);
   const sundayEarnings = (monthlySalary / getItemDaysForRate(item)) * safeNumber(item.sunday_work_days, 0);
 
-  return Math.max(0, Math.round((monthlySalary - leaveDeduction - tsDeduction - mpDeduction - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction - permissionDeduction - sandwichDeduction + bonus + sundayEarnings) * 100) / 100);
+  return Math.max(0, Math.round((monthlySalary - leaveDeduction - tsDeduction - mpDeduction - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction - permissionDeduction - sandwichDeduction - hourlyDeduction + bonus + sundayEarnings) * 100) / 100);
 };
 
 export function Payroll() {
@@ -358,6 +359,10 @@ export function Payroll() {
         // Pass lessThan9 as missingPunches so they are bucketed correctly in DB
         const effectiveMissingPunches = punchMissing + lessThan9;
 
+        // Daily biometric hours short of 9h/day, net of approved LMS permission / monthly 3h allowance.
+        // Deducted proportionally by the hour (not as a full missing day).
+        const hourlyDeductionAmount = emp.summary.hourlyDeductionAmount || 0;
+
         const calc = calculatePayroll({
           monthlySalary,
           workingDays: effectiveWorkingDays,
@@ -375,7 +380,8 @@ export function Payroll() {
           sundayWorkDays: 0,
           calculationType,
           customDays: calculationType === 'custom' ? parseFloat(customDaysInput) || 0 : 0,
-          sundayDeductions
+          sundayDeductions,
+          hourlyDeductionAmount
         });
 
         totalAmount += calc.netSalary;
@@ -406,6 +412,8 @@ export function Payroll() {
           calculation_days: calculationType === 'custom' ? parseFloat(customDaysInput) || 0 : (calculationType === 'working_days' ? effectiveWorkingDays : calendarDays),
           permission_hours: 0,
           permission_deduction: calc.permissionDeduction,
+          hourly_short_hours: emp.summary.deductibleShortfallHours || 0,
+          hourly_deduction: calc.hourlyDeductionAmount,
         });
       }
 
@@ -566,6 +574,8 @@ export function Payroll() {
         'Sandwich Deduction',
         'Permission Hours',
         'Permission Deduction',
+        'Hourly Short Hours',
+        'Hourly Deduction',
         'Holidays',
         'Advance Deduction',
         'Sunday/OD Work (days)',
@@ -600,6 +610,8 @@ export function Payroll() {
         (item.sandwich_deduction_amount || 0),
         (item.permission_hours || 0),
         (item.permission_deduction || 0),
+        (item.hourly_short_hours || 0),
+        (item.hourly_deduction || 0),
         (item.holiday_count || 0),
         (item.advance_deduction || 0),
         (item.sunday_work_days || 0),
@@ -637,7 +649,7 @@ export function Payroll() {
       if (!response.ok) throw new Error('Failed to fetch payroll items');
       const items = await response.json();
       const empIds = items.map((i: any) => i.employee?.id).filter(Boolean);
-      
+
       setPastAnalysisPayroll(payroll);
       setPastAnalysisEmpIds(empIds);
       setShowPastAnalysisModal(true);
@@ -844,7 +856,7 @@ export function Payroll() {
               <table className="w-full text-xs">
                 <thead>
                   <tr className="bg-slate-100 dark:bg-slate-700/50 border-b border-slate-200 dark:border-slate-700">
-                    {['Employee', 'Leave Taken', 'Leave Source', 'Timesheet Status', 'Missing TS', 'TS Detection', 'Missing Punch', 'Punch Ded.', 'Sandwich', 'Sandwich Ded.', 'Permissions', 'Perm. Ded.', 'Holidays', 'Advance', 'Sunday Work', 'Net Salary', 'Actions'].map(h => (
+                    {['Employee', 'Leave Taken', 'Leave Source', 'Timesheet Status', 'Missing TS', 'TS Detection', 'Missing Punch', 'Punch Ded.', 'Sandwich', 'Sandwich Ded.', 'Permissions', 'Perm. Ded.', 'Hourly Short', 'Hourly Ded.', 'Holidays', 'Advance', 'Sunday Work', 'Net Salary', 'Actions'].map(h => (
                       <th key={h} className="py-2 px-3 text-left font-semibold text-slate-600 dark:text-slate-300 whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
@@ -895,6 +907,8 @@ export function Payroll() {
                       <td className="py-2 px-3 text-red-500 font-medium">-{formatCurrency((item as any).sandwich_deduction_amount || 0)}</td>
                       <td className="py-2 px-3 font-medium text-slate-700 dark:text-slate-300">{(item as any).permission_hours || 0}h</td>
                       <td className="py-2 px-3 text-red-500 font-medium">-{formatCurrency((item as any).permission_deduction || 0)}</td>
+                      <td className="py-2 px-3 font-medium text-slate-700 dark:text-slate-300">{(item as any).hourly_short_hours || 0}h</td>
+                      <td className="py-2 px-3 text-red-500 font-medium">-{formatCurrency((item as any).hourly_deduction || 0)}</td>
                       <td className="py-2 px-3">
                         <Badge variant="info" dot>{item.holiday_count || 0} holidays</Badge>
                       </td>
@@ -1032,7 +1046,7 @@ export function Payroll() {
         <PreGenerationAnalysisModal
           isOpen={showPastAnalysisModal}
           onClose={() => setShowPastAnalysisModal(false)}
-          onConfirm={() => {}}
+          onConfirm={() => { }}
           month={pastAnalysisPayroll.month}
           year={pastAnalysisPayroll.year}
           employeeIds={pastAnalysisEmpIds}
@@ -1154,7 +1168,7 @@ function PayrollBreakdown({ items, loading, onEdit }: { items: PayrollItemWithEm
         <table className="w-full text-xs border-separate border-spacing-0">
           <thead>
             <tr>
-              {['Employee', 'Mode', 'Days', 'Monthly Sal.', 'Leave Taken', 'Leave Ded.', 'Missing TS', 'TS Ded.', 'Missing Punch', 'Punch Ded.', 'Sandwich', 'Sandwich Ded.', 'Permissions', 'Perm. Ded.', 'Holidays', 'Advance', 'Sunday', 'PF', 'ESI', 'Tax', 'Bonus', 'Net Salary', ''].map((h, i) => (
+              {['Employee', 'Mode', 'Days', 'Monthly Sal.', 'Leave Taken', 'Leave Ded.', 'Missing TS', 'TS Ded.', 'Missing Punch', 'Punch Ded.', 'Sandwich', 'Sandwich Ded.', 'Permissions', 'Perm. Ded.', 'Hourly Short', 'Hourly Ded.', 'Holidays', 'Advance', 'Sunday', 'PF', 'ESI', 'Tax', 'Bonus', 'Net Salary', ''].map((h, i) => (
                 <th
                   key={h}
                   className={`py-2.5 px-3 text-left font-semibold text-[10.5px] uppercase tracking-wide text-slate-500 dark:text-slate-300 whitespace-nowrap bg-slate-100 dark:bg-slate-800 border-b-2 border-slate-300 dark:border-slate-600 border-r border-slate-200 dark:border-slate-700 sticky top-0 ${i === 0 ? 'left-0 z-20 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.15)]' : 'z-10'
@@ -1287,6 +1301,8 @@ function PayrollBreakdown({ items, loading, onEdit }: { items: PayrollItemWithEm
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 text-red-500">-{formatCurrency((item as any).sandwich_deduction_amount || 0)}</td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 font-medium text-slate-700 dark:text-slate-300">{item.permission_hours || 0}h</td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 text-red-500">-{formatCurrency(item.permission_deduction || 0)}</td>
+                    <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 font-medium text-slate-700 dark:text-slate-300">{(item as any).hourly_short_hours || 0}h</td>
+                    <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 text-red-500">-{formatCurrency((item as any).hourly_deduction || 0)}</td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800">
                       <Badge variant="info" size="sm">{item.holiday_count || 0}d</Badge>
                     </td>
@@ -1474,6 +1490,9 @@ function PayrollBreakdown({ items, loading, onEdit }: { items: PayrollItemWithEm
               <div>Permission hours: <span className="font-semibold text-slate-900 dark:text-white">{salarySlipModal.permission_hours || 0}h</span></div>
               <div>Permission Ded.: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency((salarySlipModal as any).permission_deduction || 0)}</span></div>
 
+              <div>Hourly short (biometric &lt;9h/day): <span className="font-semibold text-slate-900 dark:text-white">{(salarySlipModal as any).hourly_short_hours || 0}h</span></div>
+              <div>Hourly Ded.: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency((salarySlipModal as any).hourly_deduction || 0)}</span></div>
+
               <div>Advance Deduction: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency(salarySlipModal.advance_deduction || 0)}</span></div>
               <div />
 
@@ -1513,7 +1532,7 @@ function PayrollBreakdown({ items, loading, onEdit }: { items: PayrollItemWithEm
           const coveredDates = item.covered_by_leave_dates || [];
           const halfDayDates = item.half_day_leave_dates || [];
           const odDates = item.od_dates || [];
-          
+
           return (
             <div className="space-y-4">
               <div className="bg-orange-50 dark:bg-orange-900/20 p-4 rounded-lg border border-orange-200 dark:border-orange-800">
@@ -1525,7 +1544,7 @@ function PayrollBreakdown({ items, loading, onEdit }: { items: PayrollItemWithEm
                     const punchTime = incompleteTimes[d];
                     return (
                       <li key={d} className="text-sm text-slate-700 dark:text-slate-300">
-                        {new Date(d).toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' })} 
+                        {new Date(d).toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' })}
                         {isIncomplete ? <span className="text-amber-600 font-medium ml-2">(⚠️ Incomplete Punch {punchTime ? `- single punch at ${punchTime}` : '- missing in/out'})</span> : <span className="text-red-600 font-medium ml-2">(No Punch at all)</span>}
                       </li>
                     );

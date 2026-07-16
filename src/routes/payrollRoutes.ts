@@ -1171,9 +1171,19 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           approvedPermissionHours: 0,
           monthlyAllowanceUsed: 0,
           permissionLimitExceededDays: 0,
-          halfDayLeaves: 0
+          halfDayLeaves: 0,
+          // Hourly shortfall tracking (biometric hours vs required 9h/day)
+          totalHoursMissing: 0,        // gross hours short of 9h/day across all attended-but-short days
+          permissionCoveredHours: 0,   // of the above, hours covered by approved LMS permission / half-day / monthly 3h allowance (no deduction)
+          deductibleShortfallHours: 0, // of the above, hours NOT covered — these get deducted (incl. LOP beyond 3h monthly cap)
+          hourlyDeductionAmount: 0     // rupee amount deducted for deductibleShortfallHours
         }
       };
+      // Per-hour rate for the new hourly-shortfall deduction, based on a 9-hour working day
+      const monthlySalaryForDed = Number(emp.ctc || 0) / 12;
+      const daysInMonthForDed = endDate.getDate();
+      const perDaySalaryForDed = daysInMonthForDed > 0 ? monthlySalaryForDed / daysInMonthForDed : 0;
+      const perHourSalaryForDed = perDaySalaryForDed / 9;
       const empLeaves = lmsLeaves.get(emp.id) || new Map();
       const empTs = timesheets.get(emp.id) || new Set();
       const empAtt = attendance.get(emp.id) || new Map();
@@ -1221,6 +1231,8 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
         let halfDayHours = 0;
         let permHours = perm ? perm.hours : 0;
         let allowanceUsedToday = 0;
+        let deductibleShortHoursToday = 0;
+        let hourlyDeductionToday = 0;
 
         if (isSunday || isHoliday) {
           paidUnpaid = 'Paid';
@@ -1289,15 +1301,45 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
               isDeductible = true;
               dedReason = attStatus + ' (Salary Deducted)';
             } else {
-              paidUnpaid = halfDayHours > 0 ? 'Paid (Half Leave)' : 'Paid (Missing Punches)';
-              isDeductible = false;
-              if (allowanceUsedToday > 0 || empData.summary.monthlyAllowanceUsed >= 3) {
-                dedReason = 'Monthly 3-Hour Permission Limit Exceeded (No Salary Deduction)';
+              // Employee was present (biometric shows some hours) but total eligible hours,
+              // after adding any approved LMS permission / half-day / monthly 3h allowance,
+              // still falls short of the required 9 hours.
+              // Requirement: deduct salary proportional to the remaining short hours (not a full day),
+              // unless the shortfall is fully covered by permission/allowance.
+              const remainingShort = Math.round((9 - eligibleHours) * 100) / 100;
+              if (remainingShort > 0.01) {
+                deductibleShortHoursToday = remainingShort;
+                hourlyDeductionToday = Math.round(remainingShort * perHourSalaryForDed * 100) / 100;
+                paidUnpaid = 'Partially Paid (Hourly Deduction)';
+                isDeductible = false; // day itself is still "attended"; deduction is hour-based, not day-based
+                if (permHours === 0 && halfDayHours === 0 && allowanceUsedToday === 0) {
+                  dedReason = `${remainingShort.toFixed(2)}h short of 9h, no LMS permission — Hourly Salary Deduction`;
+                } else if (empData.summary.monthlyAllowanceUsed >= 3) {
+                  dedReason = `${remainingShort.toFixed(2)}h short beyond 3-Hour Monthly Permission Limit — LOP (Hourly Deduction)`;
+                } else {
+                  dedReason = `${remainingShort.toFixed(2)}h short after permission/allowance — Hourly Salary Deduction`;
+                }
+                empData.summary.permissionLimitExceededDays++;
               } else {
-                dedReason = attStatus + ' (No Salary Deduction)';
+                paidUnpaid = halfDayHours > 0 ? 'Paid (Half Leave)' : 'Paid (Missing Punches)';
+                isDeductible = false;
+                if (allowanceUsedToday > 0 || empData.summary.monthlyAllowanceUsed >= 3) {
+                  dedReason = 'Within Monthly 3-Hour Permission Allowance - No Deduction';
+                } else {
+                  dedReason = attStatus + ' (No Salary Deduction)';
+                }
               }
             }
           }
+        }
+
+        // Roll up hourly-shortfall tracking for the summary card (only for days actually attended)
+        if (totalHours > 0 && totalHours < 9) {
+          const rawShort = Math.round((9 - totalHours) * 100) / 100;
+          empData.summary.totalHoursMissing += rawShort;
+          empData.summary.deductibleShortfallHours += deductibleShortHoursToday;
+          empData.summary.hourlyDeductionAmount += hourlyDeductionToday;
+          empData.summary.permissionCoveredHours += Math.max(0, rawShort - deductibleShortHoursToday);
         }
 
         if (permHours > 0) empData.summary.approvedPermissionHours += permHours;
@@ -1328,7 +1370,9 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           monthly_permission_used: allowanceUsedToday.toFixed(2),
           monthly_permission_remaining: Math.max(0, 3 - empData.summary.monthlyAllowanceUsed).toFixed(2),
           half_day_leave_status: halfDayHours > 0 ? 'Approved (4h)' : 'None',
-          eligible_hours: eligibleHours.toFixed(2)
+          eligible_hours: eligibleHours.toFixed(2),
+          deductible_short_hours: deductibleShortHoursToday.toFixed(2),
+          hourly_deduction_amount: hourlyDeductionToday
         });
       }
 
@@ -2382,9 +2426,10 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       }
 
       const sundayEarnings = Math.round(((monthlySalary || 0) / (calendarDays || 30)) * (Number(item.sunday_work_days) || 0) * 100) / 100;
+      const hourlyDeductionStored = Number(item.hourly_deduction) || 0;
       const netSalary = Math.max(
         0,
-        Math.round((monthlySalary - leaveDeduction - timesheetDeduction - missingPunchDeduction - sandwichDeductionAmount - permissionDeduction - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction + bonus + sundayEarnings) * 100) / 100
+        Math.round((monthlySalary - leaveDeduction - timesheetDeduction - missingPunchDeduction - sandwichDeductionAmount - permissionDeduction - hourlyDeductionStored - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction + bonus + sundayEarnings) * 100) / 100
       );
 
       enriched.push({
@@ -2423,6 +2468,8 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
         sandwich_dates: sandwichDates,
         permission_hours: permissionHours,
         permission_deduction: permissionDeduction,
+        hourly_short_hours: Number(item.hourly_short_hours) || 0,
+        hourly_deduction: Number(item.hourly_deduction) || 0,
         net_salary: netSalary,
         timesheet_status: tsData?.submitted_at ? 'Submitted' : 'Not submitted',
         timesheet_submitted_at: tsData?.submitted_at || null,
@@ -2459,7 +2506,9 @@ router.patch('/payroll-items/:id', async (req, res) => {
     holiday_dates,
     advance_deduction,
     permission_hours,
-    permission_deduction
+    permission_deduction,
+    hourly_short_hours,
+    hourly_deduction
   } = req.body;
 
   let client;
@@ -2508,8 +2557,10 @@ router.patch('/payroll-items/:id', async (req, res) => {
 
     const newPermissionHours = permission_hours !== undefined ? parseFloat(permission_hours) : parseFloat(item.permission_hours || 0);
     const newPermissionDeduction = permission_deduction !== undefined ? parseFloat(permission_deduction) : parseFloat(item.permission_deduction || 0);
+    const newHourlyShortHours = hourly_short_hours !== undefined ? parseFloat(hourly_short_hours) : parseFloat(item.hourly_short_hours || 0);
+    const newHourlyDeduction = hourly_deduction !== undefined ? parseFloat(hourly_deduction) : parseFloat(item.hourly_deduction || 0);
 
-    const totalDeductions = finalLeaveDeduction + tsDeduction + mpDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + storedAdvance + newPermissionDeduction;
+    const totalDeductions = finalLeaveDeduction + tsDeduction + mpDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + storedAdvance + newPermissionDeduction + newHourlyDeduction;
     const netSalary = Math.max(0, Math.round((monthlySalary - totalDeductions + newBonus + sundayEarnings) * 100) / 100);
 
     const updateRes = await client.query(
@@ -2527,8 +2578,10 @@ router.patch('/payroll-items/:id', async (req, res) => {
         permission_hours = $11,
         permission_deduction = $12,
         missing_punches = $13,
-        missing_punch_deduction = $14
-       WHERE id = $15 RETURNING *`,
+        missing_punch_deduction = $14,
+        hourly_short_hours = $15,
+        hourly_deduction = $16
+       WHERE id = $17 RETURNING *`,
       [
         newSundayWork,
         newBonus,
@@ -2544,6 +2597,8 @@ router.patch('/payroll-items/:id', async (req, res) => {
         newPermissionDeduction,
         newMissingPunches,
         mpDeduction,
+        newHourlyShortHours,
+        newHourlyDeduction,
         id
       ]
     );

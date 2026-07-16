@@ -24,6 +24,7 @@ function getAttClass(status: string) {
 
 function getPaidClass(status: string) {
   if (status.includes('Unpaid') || status.includes('Sandwich')) return 'bg-red-50 text-red-700 ring-1 ring-inset ring-red-200 font-medium dark:bg-red-500/10 dark:text-red-400 dark:ring-red-500/20';
+  if (status.includes('Partially Paid')) return 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200 font-medium dark:bg-amber-500/10 dark:text-amber-400 dark:ring-amber-500/20';
   if (status.includes('Paid Leave')) return 'bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-200 dark:bg-blue-500/10 dark:text-blue-400 dark:ring-blue-500/20';
   if (status.includes('OD')) return 'bg-violet-50 text-violet-700 ring-1 ring-inset ring-violet-200 dark:bg-violet-500/10 dark:text-violet-400 dark:ring-violet-500/20';
   return 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:ring-emerald-500/20';
@@ -225,6 +226,7 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                         {emp.summary.halfDayLeaves > 0 && <Stat label="Half-day leaves" value={emp.summary.halfDayLeaves} />}
                         <Stat label="Permission used" value={parseFloat(emp.summary.monthlyAllowanceUsed).toFixed(1) + 'h'} />
                         {emp.summary.permissionLimitExceededDays > 0 && <Stat label="Perm. exceeded" value={emp.summary.permissionLimitExceededDays} tone="bad" />}
+                        {emp.summary.deductibleShortfallHours > 0 && <Stat label="Hourly ded." value={'₹' + Math.round(emp.summary.hourlyDeductionAmount || 0).toLocaleString('en-IN')} tone="bad" />}
                       </div>
                     )}
                   </div>
@@ -249,6 +251,7 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                       <tbody>
                         {emp.days.map((day: any, idx: number) => {
                           const isDeductible = day.salary_deduction_applicable;
+                          const hasHourlyDed = parseFloat(day.hourly_deduction_amount || 0) > 0;
                           const isSunday = day.day === 'Sun';
                           const isSat = day.day === 'Sat';
                           const isWeekend = isSunday || isSat;
@@ -258,11 +261,13 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                               key={idx}
                               className={`border-b border-slate-100 dark:border-slate-800 transition-colors ${isDeductible
                                 ? 'bg-red-50/60 dark:bg-red-500/5 hover:bg-red-50 dark:hover:bg-red-500/10'
-                                : isWeekend
-                                  ? 'bg-slate-50 dark:bg-slate-800/20 hover:bg-slate-100 dark:hover:bg-slate-800/40'
-                                  : zebra
-                                    ? 'bg-slate-50/40 dark:bg-slate-800/10 hover:bg-slate-50 dark:hover:bg-slate-800/30'
-                                    : 'hover:bg-slate-50 dark:hover:bg-slate-800/30'
+                                : hasHourlyDed
+                                  ? 'bg-amber-50/60 dark:bg-amber-500/5 hover:bg-amber-50 dark:hover:bg-amber-500/10'
+                                  : isWeekend
+                                    ? 'bg-slate-50 dark:bg-slate-800/20 hover:bg-slate-100 dark:hover:bg-slate-800/40'
+                                    : zebra
+                                      ? 'bg-slate-50/40 dark:bg-slate-800/10 hover:bg-slate-50 dark:hover:bg-slate-800/30'
+                                      : 'hover:bg-slate-50 dark:hover:bg-slate-800/30'
                                 }`}
                             >
                               {/* Date */}
@@ -377,20 +382,20 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                       const monthlySalary = emp.ctc ? Math.round(emp.ctc / 12) : 0;
                       const calDays = emp.days?.length || 30;
                       const perDay = calDays > 0 ? monthlySalary / calDays : 0;
-                      
+
                       const totalUnpaid = emp.summary.unpaidDays || 0;
                       const punchMissingDays = emp.summary.punchMissing || 0;
                       const sundayDeductions = emp.summary.sundayDeductions || 0;
                       const lessThan9 = emp.summary.lessThan9 || 0;
-                      
+
                       const nonLeaveDeductions = punchMissingDays + sundayDeductions + lessThan9;
                       const unpaidLeaveDays = Math.max(0, totalUnpaid - nonLeaveDeductions);
 
                       const leaveDeduction = Math.round(perDay * unpaidLeaveDays);
                       const punchDeduction = Math.round(perDay * nonLeaveDeductions);
-                      const permExceededDays = emp.summary.permissionLimitExceededDays || 0;
-                      const permDeduction = Math.round(perDay * permExceededDays);
-                      const totalDeductions = leaveDeduction + punchDeduction + permDeduction;
+                      const permDeduction = 0; // superseded by precise hourly deduction below (kept at 0 to avoid double count)
+                      const hourlyDeductionAmount = Math.round(emp.summary.hourlyDeductionAmount || 0);
+                      const totalDeductions = leaveDeduction + punchDeduction + permDeduction + hourlyDeductionAmount;
                       const netSalary = Math.max(0, monthlySalary - totalDeductions);
                       const fmt = (n: number) => '₹' + n.toLocaleString('en-IN');
                       return (
@@ -399,7 +404,7 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                             <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">Estimated salary breakdown</span>
                             <span className="text-[11px] text-slate-400">Based on attendance data</span>
                           </div>
-                          <div className="grid grid-cols-2 sm:grid-cols-4">
+                          <div className="grid grid-cols-2 sm:grid-cols-5">
                             <div className="px-4 py-3 border-r border-b sm:border-b-0 border-slate-100 dark:border-slate-800">
                               <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Monthly salary</p>
                               <p className="text-sm font-semibold text-slate-900 dark:text-white tabular-nums">{fmt(monthlySalary)}</p>
@@ -410,13 +415,59 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                               <p className="text-[11px] text-slate-400 mt-0.5">{unpaidLeaveDays} unpaid day{unpaidLeaveDays !== 1 ? 's' : ''}</p>
                             </div>
                             <div className="px-4 py-3 border-r border-slate-100 dark:border-slate-800">
-                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Punch / permission ded.</p>
-                              <p className={`text-sm font-semibold tabular-nums ${(punchDeduction + permDeduction) > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-400'}`}>{(punchDeduction + permDeduction) > 0 ? `−${fmt(punchDeduction + permDeduction)}` : '—'}</p>
-                              <p className="text-[11px] text-slate-400 mt-0.5">{punchMissingDays + permExceededDays} day{(punchMissingDays + permExceededDays) !== 1 ? 's' : ''} flagged</p>
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Punch ded.</p>
+                              <p className={`text-sm font-semibold tabular-nums ${punchDeduction > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-400'}`}>{punchDeduction > 0 ? `−${fmt(punchDeduction)}` : '—'}</p>
+                              <p className="text-[11px] text-slate-400 mt-0.5">{punchMissingDays} day{punchMissingDays !== 1 ? 's' : ''} flagged</p>
+                            </div>
+                            <div className="px-4 py-3 border-r border-slate-100 dark:border-slate-800">
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Hourly ded. (&lt;9h/day)</p>
+                              <p className={`text-sm font-semibold tabular-nums ${hourlyDeductionAmount > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-400'}`}>{hourlyDeductionAmount > 0 ? `−${fmt(hourlyDeductionAmount)}` : '—'}</p>
+                              <p className="text-[11px] text-slate-400 mt-0.5">{(emp.summary.deductibleShortfallHours || 0).toFixed(1)}h short</p>
                             </div>
                             <div className="px-4 py-3 bg-emerald-50/60 dark:bg-emerald-500/5">
                               <p className="text-[11px] text-emerald-700 dark:text-emerald-400 font-medium mb-0.5">Estimated net salary</p>
                               <p className="text-base font-bold text-emerald-700 dark:text-emerald-400 tabular-nums">{fmt(netSalary)}</p>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* ── Hourly Attendance Shortfall Card (bottom summary) ── */}
+                    {(() => {
+                      const monthlySalary = emp.ctc ? Math.round(emp.ctc / 12) : 0;
+                      const totalMissing = emp.summary.totalHoursMissing || 0;
+                      const covered = emp.summary.permissionCoveredHours || 0;
+                      const deductible = emp.summary.deductibleShortfallHours || 0;
+                      const amount = Math.round(emp.summary.hourlyDeductionAmount || 0);
+                      const allowanceUsed = parseFloat(emp.summary.monthlyAllowanceUsed || 0);
+                      const monthlyCap = 3;
+                      const lopHours = Math.max(0, deductible); // hours beyond what LMS permission / 3h allowance could cover
+                      if (totalMissing <= 0) return null;
+                      return (
+                        <div className="mx-4 mb-5 rounded-lg border border-amber-200 dark:border-amber-900/40 bg-amber-50/40 dark:bg-amber-500/5">
+                          <div className="px-4 py-2.5 border-b border-amber-200 dark:border-amber-900/40 flex items-center justify-between">
+                            <span className="text-xs font-semibold text-amber-800 dark:text-amber-300">Hourly attendance shortfall (biometric &lt;9h/day)</span>
+                            <span className="text-[11px] text-amber-600 dark:text-amber-400">Monthly permission allowance: {monthlyCap}h free</span>
+                          </div>
+                          <div className="grid grid-cols-2 sm:grid-cols-4">
+                            <div className="px-4 py-3 border-r border-b sm:border-b-0 border-amber-100 dark:border-amber-900/30">
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Total hours missing</p>
+                              <p className="text-sm font-semibold text-slate-900 dark:text-white tabular-nums">{totalMissing.toFixed(1)}h</p>
+                            </div>
+                            <div className="px-4 py-3 border-b sm:border-b-0 sm:border-r border-amber-100 dark:border-amber-900/30">
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Covered by permission / allowance</p>
+                              <p className="text-sm font-semibold text-emerald-600 dark:text-emerald-400 tabular-nums">{covered.toFixed(1)}h</p>
+                              <p className="text-[11px] text-slate-400 mt-0.5">{allowanceUsed.toFixed(1)}h of {monthlyCap}h monthly allowance used — no deduction</p>
+                            </div>
+                            <div className="px-4 py-3 border-r border-amber-100 dark:border-amber-900/30">
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">LOP hours (beyond 3h cap / no permission)</p>
+                              <p className={`text-sm font-semibold tabular-nums ${lopHours > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-400'}`}>{lopHours > 0 ? `${lopHours.toFixed(1)}h` : '—'}</p>
+                            </div>
+                            <div className="px-4 py-3 bg-red-50/60 dark:bg-red-500/5">
+                              <p className="text-[11px] text-red-700 dark:text-red-400 font-medium mb-0.5">Deducted salary (balance)</p>
+                              <p className="text-base font-bold text-red-700 dark:text-red-400 tabular-nums">−₹{amount.toLocaleString('en-IN')}</p>
+                              <p className="text-[11px] text-slate-400 mt-0.5">of ₹{monthlySalary.toLocaleString('en-IN')} monthly salary</p>
                             </div>
                           </div>
                         </div>

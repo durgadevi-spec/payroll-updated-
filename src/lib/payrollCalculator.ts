@@ -19,6 +19,7 @@ export interface PayrollCalculationInput {
   customDays?: number;
   permissionHours?: number;
   sundayDeductions?: number;
+  hourlyDeductionAmount?: number; // Pre-calculated deduction for daily biometric hours short of 9h (not covered by LMS permission / monthly 3h allowance)
 }
 
 export interface PayrollCalculationResult {
@@ -39,6 +40,7 @@ export interface PayrollCalculationResult {
   permissionHours: number;
   permissionDeduction: number;
   sundayDeductionAmount: number;
+  hourlyDeductionAmount: number;
 }
 
 export function calculatePayroll(input: PayrollCalculationInput): PayrollCalculationResult {
@@ -61,6 +63,7 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
     customDays = 0,
     permissionHours = 0,
     sundayDeductions = 0,
+    hourlyDeductionAmount = 0,
   } = input;
 
   // Determination of days for per-day rate calculation
@@ -94,7 +97,7 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
 
   const sundayDeductionAmount = Math.round(perDaySalary * sundayDeductions * 100) / 100;
 
-  const salaryAfterAttendance = baseSalary - leaveDeduction - timesheetDeduction - missingPunchDeduction - permissionDeduction - sundayDeductionAmount + sundayWorkEarnings;
+  const salaryAfterAttendance = baseSalary - leaveDeduction - timesheetDeduction - missingPunchDeduction - permissionDeduction - sundayDeductionAmount - hourlyDeductionAmount + sundayWorkEarnings;
 
   const pfDeduction = Math.round((salaryAfterAttendance * pfRate) / 100 * 100) / 100;
   const esiDeduction =
@@ -107,7 +110,7 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
   const taxDeduction = Math.round((taxableAmount * taxRate) / 100 * 100) / 100;
 
   const totalDeductions =
-    leaveDeduction + timesheetDeduction + missingPunchDeduction + permissionDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + advanceDeduction;
+    leaveDeduction + timesheetDeduction + missingPunchDeduction + permissionDeduction + hourlyDeductionAmount + pfDeduction + esiDeduction + taxDeduction + loanDeduction + advanceDeduction;
 
   const netSalary = Math.max(0, baseSalary - totalDeductions + bonus + sundayWorkEarnings);
 
@@ -128,7 +131,8 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
     netSalary: Math.round(netSalary * 100) / 100,
     permissionHours,
     permissionDeduction,
-    sundayDeductionAmount
+    sundayDeductionAmount,
+    hourlyDeductionAmount
   };
 }
 
