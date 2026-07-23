@@ -2032,8 +2032,10 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
     const itemsResult = await payrollClient.query(
       `SELECT pi.*, e.id AS employee_id, e.name AS employee_name, e.email AS employee_email, e.designation AS employee_designation, e.department AS employee_department, e.bank_account AS employee_bank_account, e.pf_number AS employee_pf_number, e.uan_number AS employee_uan_number
        , e.employee_code AS employee_code, e.ctc AS employee_ctc
+       , ps.status AS payslip_status, ps.hold_reason AS payslip_hold_reason
        FROM payroll_items pi
        JOIN employees e ON e.id = pi.employee_id
+       LEFT JOIN payslips ps ON ps.payroll_item_id = pi.id
        WHERE pi.payroll_id = $1`,
       [payrollId]
     );
@@ -2322,14 +2324,13 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       const bonus = Number(item.bonus) || 0;
 
       const permissionHours = leaveData?.permission_hours ?? Number(item.permission_hours) ?? 0;
-      let permissionDeduction = Number(item.permission_deduction) || 0;
-
-      // If we are actively analyzing live data and have LMS permissions, recalculate
-      if (leaveData !== null && permissionHours > 3) {
-        const excessHours = permissionHours - 3;
-        const perHourSalary = ((monthlySalary || 0) / (calendarDays || 30)) / 8;
-        permissionDeduction = Math.round(excessHours * perHourSalary * 100) / 100;
-      }
+      // IMPORTANT: permission hours are already accounted for inside `hourly_deduction`
+      // (computed at Generate Payroll time via the day-by-day 9h/day + 3h/month-allowance
+      // model). Do NOT recompute a separate flat-rule deduction here from the raw monthly
+      // permission total — doing so deducted the same permission hours a second time
+      // (once inside hourly_deduction, once again as permission_deduction), causing net
+      // salary to be lower than what was actually generated. Just reuse the stored value.
+      const permissionDeduction = Number(item.permission_deduction) || 0;
 
       // --- Missing Punch Detection ---
       // Check attendance_logs for days with NO punch at all (no punch in, no punch out)
@@ -2468,6 +2469,8 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
         sandwich_dates: sandwichDates,
         permission_hours: permissionHours,
         permission_deduction: permissionDeduction,
+        payslip_status: (item as any).payslip_status ?? null,
+        payslip_hold_reason: (item as any).payslip_hold_reason ?? null,
         hourly_short_hours: Number(item.hourly_short_hours) || 0,
         hourly_deduction: Number(item.hourly_deduction) || 0,
         net_salary: netSalary,

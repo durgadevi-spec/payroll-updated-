@@ -410,7 +410,7 @@ export function Payroll() {
           working_days: calculationType === 'working_days' ? effectiveWorkingDays : calendarDays,
           calculation_type: calculationType,
           calculation_days: calculationType === 'custom' ? parseFloat(customDaysInput) || 0 : (calculationType === 'working_days' ? effectiveWorkingDays : calendarDays),
-          permission_hours: 0,
+          permission_hours: emp.summary.approvedPermissionHours || 0,
           permission_deduction: calc.permissionDeduction,
           hourly_short_hours: emp.summary.deductibleShortfallHours || 0,
           hourly_deduction: calc.hourlyDeductionAmount,
@@ -812,6 +812,9 @@ export function Payroll() {
                           <PayrollBreakdown
                             items={payrollItems}
                             loading={loadingItems}
+                            month={payroll.month}
+                            year={payroll.year}
+                            onStatusChange={() => loadPayrollItems(payroll.id)}
                             onEdit={(item) => {
                               setEditingItem(item);
                               setAdvanceInput(String(item.advance_deduction || 0));
@@ -1115,12 +1118,69 @@ export function Payroll() {
   );
 }
 
-function PayrollBreakdown({ items, loading, onEdit }: { items: PayrollItemWithEmployee[]; loading: boolean; onEdit?: (item: any) => void }) {
+function PayrollBreakdown({ items, loading, onEdit, month, year, onStatusChange }: { items: PayrollItemWithEmployee[]; loading: boolean; onEdit?: (item: any) => void; month?: number; year?: number; onStatusChange?: () => void }) {
+  const { showToast } = useToast();
   const [showDetails, setShowDetails] = useState(false);
   const [expandedItemId, setExpandedItemId] = useState<string | null>(null);
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [salarySlipModal, setSalarySlipModal] = useState<PayrollItemWithEmployee | null>(null);
   const [missingPunchDetailsModal, setMissingPunchDetailsModal] = useState<PayrollItemWithEmployee | null>(null);
+  const [showHoldModalItemId, setShowHoldModalItemId] = useState<string | null>(null);
+  const [holdReasonText, setHoldReasonText] = useState('');
+  const [holdingSalary, setHoldingSalary] = useState(false);
+  const [releasingItemId, setReleasingItemId] = useState<string | null>(null);
+
+  async function submitHoldSalary() {
+    if (!showHoldModalItemId || !holdReasonText.trim() || !month || !year) return;
+    const item = items.find(i => i.id === showHoldModalItemId);
+    if (!item) return;
+    setHoldingSalary(true);
+    try {
+      const res = await fetch('/api/payroll-processing/hold', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employeeId: item.employee_id || item.employee?.id,
+          month,
+          year,
+          reason: holdReasonText
+        })
+      });
+      if (res.ok) {
+        showToast('success', 'Salary put on hold');
+        setShowHoldModalItemId(null);
+        setHoldReasonText('');
+        onStatusChange?.();
+      } else {
+        const d = await res.json().catch(() => ({} as any));
+        showToast('error', d.error || 'Failed to hold salary');
+      }
+    } catch (e) {
+      showToast('error', 'Communication error');
+    }
+    setHoldingSalary(false);
+  }
+
+  async function releaseSalary(item: PayrollItemWithEmployee) {
+    if (!month || !year) return;
+    setReleasingItemId(item.id);
+    try {
+      const res = await fetch('/api/payroll-processing/release', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ employeeId: item.employee_id || item.employee?.id, month, year })
+      });
+      if (res.ok) {
+        showToast('success', 'Salary released');
+        onStatusChange?.();
+      } else {
+        showToast('error', 'Failed to release salary');
+      }
+    } catch (e) {
+      showToast('error', 'Failed to release salary');
+    }
+    setReleasingItemId(null);
+  }
 
   if (loading) return <div className="p-3"><TableSkeleton rows={2} cols={8} /></div>;
 
@@ -1168,7 +1228,7 @@ function PayrollBreakdown({ items, loading, onEdit }: { items: PayrollItemWithEm
         <table className="w-full text-xs border-separate border-spacing-0">
           <thead>
             <tr>
-              {['Employee', 'Mode', 'Days', 'Monthly Sal.', 'Leave Taken', 'Leave Ded.', 'Missing TS', 'TS Ded.', 'Missing Punch', 'Punch Ded.', 'Sandwich', 'Sandwich Ded.', 'Permissions', 'Perm. Ded.', 'Hourly Short', 'Hourly Ded.', 'Holidays', 'Advance', 'Sunday', 'PF', 'ESI', 'Tax', 'Bonus', 'Net Salary', ''].map((h, i) => (
+              {['Employee', 'Mode', 'Days', 'Monthly Sal.', 'Leave Taken', 'Leave Ded.', 'Missing TS', 'TS Ded.', 'Missing Punch', 'Punch Ded.', 'Sandwich', 'Sandwich Ded.', 'Permissions', 'Perm. Ded.', 'Hourly Short', 'Hourly Ded.', 'Holidays', 'Advance', 'Sunday', 'PF', 'ESI', 'Tax', 'Bonus', 'Net Salary', 'Status', ''].map((h, i) => (
                 <th
                   key={h}
                   className={`py-2.5 px-3 text-left font-semibold text-[10.5px] uppercase tracking-wide text-slate-500 dark:text-slate-300 whitespace-nowrap bg-slate-100 dark:bg-slate-800 border-b-2 border-slate-300 dark:border-slate-600 border-r border-slate-200 dark:border-slate-700 sticky top-0 ${i === 0 ? 'left-0 z-20 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.15)]' : 'z-10'
@@ -1313,6 +1373,33 @@ function PayrollBreakdown({ items, loading, onEdit }: { items: PayrollItemWithEm
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 text-red-500">-{formatCurrency(item.tax_deduction)}</td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 text-emerald-600 dark:text-emerald-400">+{formatCurrency(item.bonus)}</td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 font-bold text-slate-800 dark:text-white">{formatCurrency(getNetSalary(item))}</td>
+                    <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800">
+                      {(item as any).payslip_status === 'held' ? (
+                        <div className="flex flex-col gap-1">
+                          <Badge variant="warning" size="sm">On Hold</Badge>
+                          {(item as any).payslip_hold_reason && (
+                            <span className="text-[10px] text-amber-600 dark:text-amber-400 italic max-w-[140px] truncate" title={(item as any).payslip_hold_reason}>
+                              "{(item as any).payslip_hold_reason}"
+                            </span>
+                          )}
+                          <button
+                            onClick={() => releaseSalary(item)}
+                            disabled={releasingItemId === item.id}
+                            className="flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded border border-emerald-300 text-emerald-600 hover:bg-emerald-50 dark:border-emerald-700 dark:text-emerald-400 dark:hover:bg-emerald-900/30 disabled:opacity-50"
+                          >
+                            <Play size={10} /> {releasingItemId === item.id ? 'Releasing...' : 'Release'}
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setShowHoldModalItemId(item.id)}
+                          className="flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded border border-amber-300 text-amber-600 hover:bg-amber-50 dark:border-amber-700 dark:text-amber-400 dark:hover:bg-amber-900/30"
+                          title="Hold this employee's salary and notify them by email"
+                        >
+                          <AlertTriangle size={10} /> Hold Salary
+                        </button>
+                      )}
+                    </td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800">
                       {onEdit && (
                         <button
@@ -1577,6 +1664,42 @@ function PayrollBreakdown({ items, loading, onEdit }: { items: PayrollItemWithEm
             </div>
           );
         })()}
+      </Modal>
+
+      <Modal
+        isOpen={!!showHoldModalItemId}
+        onClose={() => { setShowHoldModalItemId(null); setHoldReasonText(''); }}
+        title="Hold Salary"
+        size="sm"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => { setShowHoldModalItemId(null); setHoldReasonText(''); }}>Cancel</Button>
+            <Button
+              variant="primary"
+              onClick={submitHoldSalary}
+              disabled={holdingSalary || !holdReasonText.trim()}
+            >
+              {holdingSalary ? 'Processing...' : 'Confirm Hold'}
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            Specify the reason for holding the salary for{' '}
+            <b>{items.find(i => i.id === showHoldModalItemId)?.employee?.name}</b>. An email notification will be sent automatically.
+          </p>
+          <div>
+            <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Reason for Hold</label>
+            <textarea
+              value={holdReasonText}
+              onChange={(e) => setHoldReasonText(e.target.value)}
+              placeholder="e.g. Timesheet mismatch, Pending documentation..."
+              rows={3}
+              className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+        </div>
       </Modal>
     </div>
   );
