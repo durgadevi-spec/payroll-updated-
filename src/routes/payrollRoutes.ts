@@ -1196,7 +1196,8 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           totalHoursMissing: 0,        // gross hours short of 9h/day across all attended-but-short days
           permissionCoveredHours: 0,   // of the above, hours covered by approved LMS permission / half-day / monthly 3h allowance (no deduction)
           deductibleShortfallHours: 0, // of the above, hours NOT covered — these get deducted (incl. LOP beyond 3h monthly cap)
-          hourlyDeductionAmount: 0     // rupee amount deducted for deductibleShortfallHours
+          hourlyDeductionAmount: 0,    // rupee amount deducted for deductibleShortfallHours
+          totalExcessHours: 0           // total hours worked beyond 9h/day across all working days
         }
       };
       // Per-hour rate for the new hourly-shortfall deduction, based on a 9-hour working day
@@ -1359,13 +1360,21 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           }
         }
 
-        // Roll up hourly-shortfall tracking for the summary card (only for days actually attended)
-        if (totalHours > 0 && totalHours < 9) {
-          const rawShort = Math.round((9 - totalHours) * 100) / 100;
-          empData.summary.totalHoursMissing += rawShort;
-          empData.summary.deductibleShortfallHours += deductibleShortHoursToday;
-          empData.summary.hourlyDeductionAmount += hourlyDeductionToday;
-          empData.summary.permissionCoveredHours += Math.max(0, rawShort - deductibleShortHoursToday);
+        // Roll up hourly-shortfall tracking for the summary card (only for days actually attended and required to work)
+        const isFullDayLeave = leave && (!leave.duration || !leave.duration.toLowerCase().includes('half'));
+        if (totalHours > 0 && !isSunday && !isHoliday && !isFullDayLeave) {
+          const requiredBiometricHours = 9 - halfDayHours;
+          if (totalHours < requiredBiometricHours) {
+            const rawShort = Math.round((requiredBiometricHours - totalHours) * 100) / 100;
+            empData.summary.totalHoursMissing += rawShort;
+            empData.summary.deductibleShortfallHours += deductibleShortHoursToday;
+            empData.summary.hourlyDeductionAmount += hourlyDeductionToday;
+            empData.summary.permissionCoveredHours += Math.max(0, rawShort - deductibleShortHoursToday);
+          }
+          // Track excess hours (worked more than required)
+          if (totalHours > requiredBiometricHours) {
+            empData.summary.totalExcessHours += Math.round((totalHours - requiredBiometricHours) * 100) / 100;
+          }
         }
 
         if (permHoursUsed > 0) empData.summary.approvedPermissionHours += permHoursUsed;

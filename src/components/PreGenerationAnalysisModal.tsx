@@ -473,6 +473,23 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                         </div>
                       );
                     })()}
+
+                    {/* ── Hourly Excess Card (bottom summary) ── */}
+                    {(() => {
+                      const excessHours = emp.summary.totalExcessHours || 0;
+                      if (excessHours <= 0) return null;
+                      return (
+                        <div className="mx-4 mb-5 rounded-lg border border-teal-200 dark:border-teal-900/40 bg-teal-50/40 dark:bg-teal-500/5">
+                          <div className="px-4 py-2.5 border-b border-teal-200 dark:border-teal-900/40 flex items-center justify-between">
+                            <span className="text-xs font-semibold text-teal-800 dark:text-teal-300">Excess hours worked (biometric &gt;9h/day)</span>
+                          </div>
+                          <div className="px-4 py-3">
+                            <p className="text-sm font-semibold text-teal-700 dark:text-teal-400 tabular-nums">{excessHours.toFixed(1)}h extra across the month</p>
+                            <p className="text-[11px] text-slate-400 mt-0.5">Total hours worked beyond the required 9h/day on all working days</p>
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   {/* ── Employee navigation (if multiple) ── */}
