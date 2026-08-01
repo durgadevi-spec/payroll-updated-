@@ -58,10 +58,15 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
   const lastFetchKey = useRef<string>('');
   const empDropdownRef = useRef<HTMLDivElement>(null);
 
-  // Initialize selectedEmpIndices when data loads
+  // Initialize selectedEmpIndices and active employee when data loads
   useEffect(() => {
     if (data?.employees?.length) {
-      setSelectedEmpIndices(new Set(data.employees.map((_: any, i: number) => i)));
+      const sorted = data.employees.map((_: any, i: number) => i).sort((a: number, b: number) => 
+        (data.employees[a]?.name || '').toLowerCase().localeCompare((data.employees[b]?.name || '').toLowerCase())
+      );
+      setSelectedEmpIndices(new Set(sorted));
+      // Only set activeEmpIdx if it hasn't been set yet or on initial load
+      setActiveEmpIdx(sorted[0]);
     }
   }, [data]);
 
@@ -123,7 +128,7 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
   // Build sorted index map for alphabetical display in dropdown
   const sortedEmpIndices = employees
     .map((_: any, i: number) => i)
-    .sort((a: number, b: number) => (employees[a]?.name || '').localeCompare(employees[b]?.name || ''));
+    .sort((a: number, b: number) => (employees[a]?.name || '').toLowerCase().localeCompare((employees[b]?.name || '').toLowerCase()));
 
   // Get ordered list of selected indices for prev/next navigation
   const selectedList = sortedEmpIndices.filter((i: number) => selectedEmpIndices.has(i));
