@@ -1253,6 +1253,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
         let allowanceUsedToday = 0;
         let deductibleShortHoursToday = 0;
         let hourlyDeductionToday = 0;
+        let permHoursUsed = 0;
 
         if (isSunday || isHoliday) {
           paidUnpaid = 'Paid';
@@ -1290,7 +1291,6 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
             }
           }
           eligibleHours += halfDayHours;
-          let permHoursUsed = 0;
 
           if (totalHours > 0 || halfDayHours > 0 || permHours > 0) {
             if (eligibleHours < 9) {
