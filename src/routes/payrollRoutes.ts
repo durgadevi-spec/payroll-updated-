@@ -1302,7 +1302,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
                 allowanceUsedToday = totalCoverage;
                 empData.summary.monthlyAllowanceUsed += totalCoverage;
                 eligibleHours += totalCoverage;
-                
+
                 if (permHours > 0) {
                   permHoursUsed = Math.min(permHours, totalCoverage);
                 }
@@ -2461,7 +2461,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
         }
       }
 
-      const sundayEarnings = Math.round(((monthlySalary || 0) / (calendarDays || 30)) * (Number(item.sunday_work_days) || 0) * 2 * 100) / 100;
+      const sundayEarnings = Math.round(((monthlySalary || 0) / (calendarDays || 30)) * (Number(item.sunday_work_days) || 0) * 100) / 100;
       const hourlyDeductionStored = Number(item.hourly_deduction) || 0;
       const netSalary = Math.max(
         0,
@@ -2591,7 +2591,7 @@ router.patch('/payroll-items/:id', async (req, res) => {
     const taxDeduction = parseFloat(item.tax_deduction || '0');
     const loanDeduction = parseFloat(item.loan_deduction || '0');
 
-    const sundayEarnings = Math.round(dayRate * newSundayWork * 2 * 100) / 100;
+    const sundayEarnings = Math.round(dayRate * newSundayWork * 100) / 100;
 
     const newPermissionHours = permission_hours !== undefined ? parseFloat(permission_hours) : parseFloat(item.permission_hours || 0);
     const newPermissionDeduction = permission_deduction !== undefined ? parseFloat(permission_deduction) : parseFloat(item.permission_deduction || 0);
