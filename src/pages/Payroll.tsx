@@ -112,6 +112,10 @@ export function Payroll() {
   const [bonusInput, setBonusInput] = useState('0');
   const [calculationType, setCalculationType] = useState<'monthly' | 'custom' | 'working_days'>('monthly');
   const [customDaysInput, setCustomDaysInput] = useState('30');
+  const [showRegenReasonModal, setShowRegenReasonModal] = useState(false);
+  const [pendingGenerateData, setPendingGenerateData] = useState<any>(null);
+  const [regenReasonInput, setRegenReasonInput] = useState('');
+  const [regenSubmitting, setRegenSubmitting] = useState(false);
 
   const countSundays = (month: number, year: number) => {
     let sundays = 0;
@@ -284,12 +288,17 @@ export function Payroll() {
     setRefreshing(false);
   }
 
-  async function generatePayroll(dataOverride?: any) {
+  async function generatePayroll(dataOverride?: any, regenReason?: string) {
     const dataToUse = dataOverride || previewData;
     if (!dataToUse) return;
 
     setGenerating(true);
     try {
+      // Version = how many payrolls already exist for this month/year, plus this new one.
+      // First generation for a month is V1; every regeneration after that increments.
+      const existingForPeriod = payrolls.filter(p => p.month === genMonth && p.year === genYear);
+      const version = existingForPeriod.length + 1;
+
       const { data: settingsData } = await supabase.from('settings').select('*');
       const settings = Object.fromEntries((settingsData || []).map(s => [s.key, s.value || '']));
       const pfRate = parseFloat(settings.pf_rate || '12');
@@ -328,7 +337,9 @@ export function Payroll() {
           status: 'completed',
           employee_count: dataToUse.employees.length,
           total_amount: 0,
-          generated_at: new Date().toISOString()
+          generated_at: new Date().toISOString(),
+          version,
+          regeneration_reason: regenReason || null
         })
         .select()
         .single();
@@ -441,10 +452,10 @@ export function Payroll() {
         action: 'GENERATE_PAYROLL',
         entity: 'payrolls',
         entity_id: newPayroll.id,
-        details: { month: genMonth, year: genYear, employee_count: dataToUse.employees.length, total_amount: totalAmount },
+        details: { month: genMonth, year: genYear, employee_count: dataToUse.employees.length, total_amount: totalAmount, version, regeneration_reason: regenReason || null },
       });
 
-      showToast('success', `Payroll for ${getMonthName(genMonth)} ${genYear} generated successfully`);
+      showToast('success', `Payroll for ${getMonthName(genMonth)} ${genYear} (V${version}) generated successfully`);
     } catch (err) {
       console.error(err);
       showToast('error', 'Failed to generate payroll');
@@ -454,6 +465,30 @@ export function Payroll() {
     setShowPreGenModal(false);
     setShowConfigModal(false);
     await loadPayrolls();
+  }
+
+  // Called when the user confirms in the Preview & Validate modal.
+  // If payroll(s) already exist for this month/year, we don't generate right
+  // away — we ask for a reason first, then generate as the next version (V2, V3, ...).
+  function handleConfirmGenerate(dataOverride: any) {
+    const existingForPeriod = payrolls.filter(p => p.month === genMonth && p.year === genYear);
+    if (existingForPeriod.length > 0) {
+      setPendingGenerateData(dataOverride);
+      setShowPreGenModal(false);
+      setShowRegenReasonModal(true);
+      return;
+    }
+    generatePayroll(dataOverride);
+  }
+
+  async function submitRegenReasonAndGenerate() {
+    if (!regenReasonInput.trim() || !pendingGenerateData) return;
+    setRegenSubmitting(true);
+    await generatePayroll(pendingGenerateData, regenReasonInput.trim());
+    setRegenSubmitting(false);
+    setShowRegenReasonModal(false);
+    setPendingGenerateData(null);
+    setRegenReasonInput('');
   }
 
   async function markAsPaid(payroll: PayrollType) {
@@ -736,7 +771,15 @@ export function Payroll() {
                   <React.Fragment key={payroll.id}>
                     <tr className="border-b border-slate-50 dark:border-slate-700/30 hover:bg-slate-50/50 dark:hover:bg-slate-700/20 transition-colors">
                       <td className="py-3 px-4">
-                        <p className="font-medium text-slate-700 dark:text-slate-200 text-xs">{getMonthName(payroll.month)} {payroll.year}</p>
+                        <div className="flex items-center gap-2">
+                          <p className="font-medium text-slate-700 dark:text-slate-200 text-xs">{getMonthName(payroll.month)} {payroll.year}</p>
+                          <span
+                            className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-300"
+                            title={payroll.regeneration_reason ? `Regeneration reason: ${payroll.regeneration_reason}` : 'First payroll generated for this period'}
+                          >
+                            V{payroll.version || 1}
+                          </span>
+                        </div>
                       </td>
                       <td className="py-3 px-4">
                         <span className="text-xs text-slate-500 dark:text-slate-400">{payroll.employee_count} employees</span>
@@ -814,6 +857,7 @@ export function Payroll() {
                             loading={loadingItems}
                             month={payroll.month}
                             year={payroll.year}
+                            payrollId={payroll.id}
                             onStatusChange={() => loadPayrollItems(payroll.id)}
                             onEdit={(item) => {
                               setEditingItem(item);
@@ -1039,11 +1083,41 @@ export function Payroll() {
       <PreGenerationAnalysisModal
         isOpen={showPreGenModal}
         onClose={() => setShowPreGenModal(false)}
-        onConfirm={generatePayroll}
+        onConfirm={handleConfirmGenerate}
         month={genMonth}
         year={genYear}
         employeeIds={selectedEmployeeId ? [selectedEmployeeId] : employees.map(e => e.id)}
       />
+
+      <Modal
+        isOpen={showRegenReasonModal}
+        onClose={() => { if (!regenSubmitting) { setShowRegenReasonModal(false); setPendingGenerateData(null); setRegenReasonInput(''); } }}
+        title="Regenerate Payroll"
+        subtitle={`${getMonthName(genMonth)} ${genYear} already has a generated payroll`}
+        size="sm"
+        footer={
+          <div className="flex justify-end gap-3">
+            <Button variant="outline" onClick={() => { setShowRegenReasonModal(false); setPendingGenerateData(null); setRegenReasonInput(''); }} disabled={regenSubmitting}>
+              Cancel
+            </Button>
+            <Button icon={<Play size={14} />} onClick={submitRegenReasonAndGenerate} disabled={regenSubmitting || !regenReasonInput.trim()}>
+              {regenSubmitting ? 'Generating...' : 'Confirm & Generate'}
+            </Button>
+          </div>
+        }
+      >
+        <p className="text-sm text-slate-600 dark:text-slate-300 mb-3">
+          A payroll for <b>{getMonthName(genMonth)} {genYear}</b> has already been generated. Please enter a reason for regenerating it. This will be saved as a new version.
+        </p>
+        <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Reason for regenerating</label>
+        <textarea
+          value={regenReasonInput}
+          onChange={e => setRegenReasonInput(e.target.value)}
+          rows={3}
+          placeholder="e.g. Corrected attendance data after payroll was first generated"
+          className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+      </Modal>
 
       {pastAnalysisPayroll && (
         <PreGenerationAnalysisModal
@@ -1118,7 +1192,7 @@ export function Payroll() {
   );
 }
 
-function PayrollBreakdown({ items, loading, onEdit, month, year, onStatusChange }: { items: PayrollItemWithEmployee[]; loading: boolean; onEdit?: (item: any) => void; month?: number; year?: number; onStatusChange?: () => void }) {
+function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onStatusChange }: { items: PayrollItemWithEmployee[]; loading: boolean; onEdit?: (item: any) => void; month?: number; year?: number; payrollId?: string; onStatusChange?: () => void }) {
   const { showToast } = useToast();
   const [showDetails, setShowDetails] = useState(false);
   const [expandedItemId, setExpandedItemId] = useState<string | null>(null);
@@ -1141,6 +1215,7 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, onStatusChange 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           employeeId: item.employee_id || item.employee?.id,
+          payrollId,
           month,
           year,
           reason: holdReasonText
@@ -1168,7 +1243,7 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, onStatusChange 
       const res = await fetch('/api/payroll-processing/release', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ employeeId: item.employee_id || item.employee?.id, month, year })
+        body: JSON.stringify({ employeeId: item.employee_id || item.employee?.id, payrollId, month, year })
       });
       if (res.ok) {
         showToast('success', 'Salary released');

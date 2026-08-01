@@ -486,22 +486,33 @@ router.get('/payroll-processing', async (req, res) => {
 });
 
 router.post('/payroll-processing/hold', async (req, res) => {
-  const { employeeId, month, year, reason } = req.body;
+  const { employeeId, payrollId, month, year, reason } = req.body;
   if (!employeeId || !reason) return res.status(400).json({ error: 'Employee ID and reason are required' });
 
   let client;
   try {
     client = await payrollPool.connect();
 
-    // Find the payslip for this employee and month
-    const psRes = await client.query(
-      `SELECT ps.id, e.email, e.name 
-       FROM payslips ps
-       JOIN payrolls p ON ps.payroll_id = p.id
-       JOIN employees e ON ps.employee_id = e.id
-       WHERE ps.employee_id = $1 AND p.month = $2 AND p.year = $3`,
-      [employeeId, month, year]
-    );
+    // Find the payslip for this employee, scoped to the exact payroll run being viewed
+    // (falls back to month/year only if payrollId wasn't supplied). Scoping by payrollId
+    // matters when there are multiple payroll runs generated for the same month/year —
+    // otherwise the wrong duplicate's payslip could get updated.
+    const psRes = payrollId
+      ? await client.query(
+        `SELECT ps.id, e.email, e.name 
+           FROM payslips ps
+           JOIN employees e ON ps.employee_id = e.id
+           WHERE ps.employee_id = $1 AND ps.payroll_id = $2`,
+        [employeeId, payrollId]
+      )
+      : await client.query(
+        `SELECT ps.id, e.email, e.name 
+           FROM payslips ps
+           JOIN payrolls p ON ps.payroll_id = p.id
+           JOIN employees e ON ps.employee_id = e.id
+           WHERE ps.employee_id = $1 AND p.month = $2 AND p.year = $3`,
+        [employeeId, month, year]
+      );
 
     if (psRes.rows.length === 0) {
       return res.status(404).json({ error: 'Payslip not found for this period. Please generate payroll first.' });
@@ -517,6 +528,7 @@ router.post('/payroll-processing/hold', async (req, res) => {
 
     try {
       const subject = `Salary Hold Notification - ${getMonthName(Number(month))} ${year}`;
+      const text = `Salary Hold Notification\n\nDear ${name},\n\nThis is to inform you that your salary for ${getMonthName(Number(month))} ${year} has been put on hold by the administration.\n\nReason for Hold:\n${reason}\n\nPlease contact the Admin or HR for further clarification.\n\nThis is an automated notification from the Payroll System.`;
       const html = `
         <div style="font-family: sans-serif; padding: 20px; color: #334155;">
           <h2 style="color: #1e40af;">Salary Hold Notification</h2>
@@ -531,7 +543,7 @@ router.post('/payroll-processing/hold', async (req, res) => {
           <p style="font-size: 12px; color: #94a3b8;">This is an automated notification from the Payroll System.</p>
         </div>
       `;
-      await sendEmail({ to: email, subject, html, text: subject });
+      await sendEmail({ to: email, subject, html, text });
     } catch (emailErr) {
       console.error('Failed to send hold email for:', email, emailErr);
       // We don't fail the whole request if email fails, but maybe log it
@@ -547,15 +559,23 @@ router.post('/payroll-processing/hold', async (req, res) => {
 });
 
 router.post('/payroll-processing/release', async (req, res) => {
-  const { employeeId, month, year } = req.body;
+  const { employeeId, payrollId, month, year } = req.body;
   let client;
   try {
     client = await payrollPool.connect();
-    await client.query(
-      `UPDATE payslips SET status = 'draft', hold_reason = NULL 
-       WHERE employee_id = $1 AND payroll_id IN (SELECT id FROM payrolls WHERE month=$2 AND year=$3)`,
-      [employeeId, month, year]
-    );
+    if (payrollId) {
+      await client.query(
+        `UPDATE payslips SET status = 'draft', hold_reason = NULL 
+         WHERE employee_id = $1 AND payroll_id = $2`,
+        [employeeId, payrollId]
+      );
+    } else {
+      await client.query(
+        `UPDATE payslips SET status = 'draft', hold_reason = NULL 
+         WHERE employee_id = $1 AND payroll_id IN (SELECT id FROM payrolls WHERE month=$2 AND year=$3)`,
+        [employeeId, month, year]
+      );
+    }
     res.json({ success: true, message: 'Salary released' });
   } catch (err) {
     console.error('Error releasing salary:', err);

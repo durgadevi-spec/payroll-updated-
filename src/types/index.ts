@@ -31,6 +31,8 @@ export interface Payroll {
   generated_at: string | null;
   paid_at: string | null;
   created_at: string;
+  version?: number;
+  regeneration_reason?: string | null;
 }
 
 export interface PayrollItem {
