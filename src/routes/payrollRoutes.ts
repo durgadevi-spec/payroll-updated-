@@ -2461,7 +2461,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
         }
       }
 
-      const sundayEarnings = Math.round(((monthlySalary || 0) / (calendarDays || 30)) * (Number(item.sunday_work_days) || 0) * 100) / 100;
+      const sundayEarnings = Math.round(((monthlySalary || 0) / (calendarDays || 30)) * (Number(item.sunday_work_days) || 0) * 2 * 100) / 100;
       const hourlyDeductionStored = Number(item.hourly_deduction) || 0;
       const netSalary = Math.max(
         0,
@@ -2583,15 +2583,15 @@ router.patch('/payroll-items/:id', async (req, res) => {
     const calendarDays = new Date(parseInt(item.year), parseInt(item.month), 0).getDate();
     const dayRate = monthlySalary / calendarDays;
 
-    const finalLeaveDeduction = leave_deduction !== undefined ? parseFloat(leave_deduction) : parseFloat(item.leave_deduction);
-    const tsDeduction = timesheet_deduction !== undefined ? parseFloat(timesheet_deduction) : parseFloat(item.timesheet_deduction);
-    const mpDeduction = missing_punch_deduction !== undefined ? parseFloat(missing_punch_deduction) : parseFloat(item.missing_punch_deduction || 0);
-    const pfDeduction = parseFloat(item.pf_deduction);
-    const esiDeduction = parseFloat(item.esi_deduction);
-    const taxDeduction = parseFloat(item.tax_deduction);
-    const loanDeduction = parseFloat(item.loan_deduction);
+    const finalLeaveDeduction = leave_deduction !== undefined ? parseFloat(leave_deduction) : parseFloat(item.leave_deduction || '0');
+    const tsDeduction = timesheet_deduction !== undefined ? parseFloat(timesheet_deduction) : parseFloat(item.timesheet_deduction || '0');
+    const mpDeduction = missing_punch_deduction !== undefined ? parseFloat(missing_punch_deduction) : parseFloat(item.missing_punch_deduction || '0');
+    const pfDeduction = parseFloat(item.pf_deduction || '0');
+    const esiDeduction = parseFloat(item.esi_deduction || '0');
+    const taxDeduction = parseFloat(item.tax_deduction || '0');
+    const loanDeduction = parseFloat(item.loan_deduction || '0');
 
-    const sundayEarnings = Math.round(dayRate * newSundayWork * 100) / 100;
+    const sundayEarnings = Math.round(dayRate * newSundayWork * 2 * 100) / 100;
 
     const newPermissionHours = permission_hours !== undefined ? parseFloat(permission_hours) : parseFloat(item.permission_hours || 0);
     const newPermissionDeduction = permission_deduction !== undefined ? parseFloat(permission_deduction) : parseFloat(item.permission_deduction || 0);

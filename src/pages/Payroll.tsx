@@ -77,7 +77,7 @@ const getNetSalary = (item: PayrollItemWithEmployee) => {
   const sandwichDeduction = safeNumber((item as any).sandwich_deduction_amount, 0);
   const hourlyDeduction = safeNumber((item as any).hourly_deduction, 0);
   const bonus = safeNumber(item.bonus, 0);
-  const sundayEarnings = (monthlySalary / getItemDaysForRate(item)) * safeNumber(item.sunday_work_days, 0);
+  const sundayEarnings = (monthlySalary / getItemDaysForRate(item)) * safeNumber(item.sunday_work_days, 0) * 2;
 
   return Math.max(0, Math.round((monthlySalary - leaveDeduction - tsDeduction - mpDeduction - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction - permissionDeduction - sandwichDeduction - hourlyDeduction + bonus + sundayEarnings) * 100) / 100);
 };
@@ -269,6 +269,8 @@ export function Payroll() {
           advance_deduction: advanceByEmp.get(item.employee_id) || 0,
           permission_hours: item.permission_hours,
           permission_deduction: item.permission_deduction,
+          hourly_short_hours: item.hourly_short_hours || 0,
+          hourly_deduction: item.hourly_deduction || 0,
         };
 
         await fetch(`/api/payroll-items/${item.id}`, {
