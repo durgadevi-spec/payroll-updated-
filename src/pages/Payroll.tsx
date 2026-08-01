@@ -417,7 +417,7 @@ export function Payroll() {
           unpaid_leaves: unpaidLeaves,
           missing_timesheets: missingTimesheets,
           holiday_count: 0,
-          pa_sla_consumed: 0,
+          pa_sla_consumed: emp.summary.paSlaConsumed || 0,
           timesheet_excluded_dates: [],
           holiday_dates: [],
           working_days: calculationType === 'working_days' ? effectiveWorkingDays : calendarDays,
@@ -914,7 +914,10 @@ export function Payroll() {
                   {[...analysisItems].sort((a, b) => (a.employee?.name || '').localeCompare(b.employee?.name || '', undefined, { sensitivity: 'base' })).map(item => (
                     <tr key={item.id} className="border-b border-slate-100 dark:border-slate-700/30 hover:bg-white dark:hover:bg-slate-700/30">
                       <td className="py-2 px-3 font-medium text-slate-700 dark:text-slate-200">{item.employee?.name}</td>
-                      <td className="py-2 px-3 text-slate-600 dark:text-slate-300">{item.unpaid_leaves} day{item.unpaid_leaves === 1 ? '' : 's'}</td>
+                      <td className="py-2 px-3 text-slate-600 dark:text-slate-300">
+                        {(item as any).total_leaves ?? item.unpaid_leaves} day{((item as any).total_leaves ?? item.unpaid_leaves) === 1 ? '' : 's'}
+                        {item.unpaid_leaves > 0 && <span className="text-red-500 dark:text-red-400"> ({item.unpaid_leaves} unpaid)</span>}
+                      </td>
                       <td className="py-2 px-3 text-slate-500 dark:text-slate-400">{item.leave_source || 'N/A'}</td>
                       <td className="py-2 px-3 text-slate-500 dark:text-slate-400">{item.timesheet_status || 'Unknown'}</td>
                       <td className="py-2 px-3 text-slate-600 dark:text-slate-300">
@@ -1357,7 +1360,17 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                     </td>
                     <td className="py-2 px-3 text-slate-600 dark:text-slate-300 border-r border-b border-slate-100 dark:border-slate-800">{formatCurrency(item.monthly_salary)}</td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800">
-                      <div>{item.unpaid_leaves} day{item.unpaid_leaves === 1 ? '' : 's'}</div>
+                      <div>{(item as any).total_leaves ?? item.unpaid_leaves} day{((item as any).total_leaves ?? item.unpaid_leaves) === 1 ? '' : 's'}</div>
+                      {((item as any).paid_leaves || 0) > 0 && (
+                        <div className="text-[10px] text-green-600 dark:text-green-400 font-medium mt-0.5">
+                          {(item as any).paid_leaves}d covered by PA/SLA balance (no deduction)
+                        </div>
+                      )}
+                      {item.unpaid_leaves > 0 && (
+                        <div className="text-[10px] text-red-500 dark:text-red-400 font-medium mt-0.5">
+                          {item.unpaid_leaves}d unpaid
+                        </div>
+                      )}
                       {odDates.length > 0 && (
                         <div className="text-[10px] text-purple-600 dark:text-purple-400 font-medium mt-0.5">
                           +{odDates.length}d OD (no deduction)
@@ -1639,8 +1652,10 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
               <div>Timesheet missing days: <span className="font-semibold text-slate-900 dark:text-white">{salarySlipModal.missing_timesheets}</span></div>
               <div>TS Deduction: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency(getTimesheetDeduction(salarySlipModal))}</span></div>
 
-              <div>LMS Approved leaves: <span className="font-semibold text-slate-900 dark:text-white">{salarySlipModal.unpaid_leaves}</span></div>
-              <div>leave deduction: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency(salarySlipModal.leave_deduction)}</span></div>
+              <div>LMS leaves taken: <span className="font-semibold text-slate-900 dark:text-white">{(salarySlipModal as any).total_leaves ?? salarySlipModal.unpaid_leaves}</span></div>
+              <div>Unpaid leaves: <span className="font-semibold text-slate-900 dark:text-white">{salarySlipModal.unpaid_leaves}</span></div>
+
+              <div className="col-span-2 flex gap-2">leave deduction: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency(salarySlipModal.leave_deduction)}</span></div>
 
               <div>punch Missing: <span className="font-semibold text-slate-900 dark:text-white">{(salarySlipModal as any).missing_punches || 0}</span></div>
               <div>Punch Ded.: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency(getMissingPunchDeduction(salarySlipModal))}</span></div>

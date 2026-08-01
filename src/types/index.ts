@@ -51,6 +51,8 @@ export interface PayrollItem {
   bonus: number;
   net_salary: number;
   unpaid_leaves: number;
+  total_leaves?: number;
+  paid_leaves?: number;
   missing_timesheets: number;
   holiday_count: number;
   working_days: number;

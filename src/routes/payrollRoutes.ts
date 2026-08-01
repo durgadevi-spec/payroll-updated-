@@ -1197,7 +1197,8 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           permissionCoveredHours: 0,   // of the above, hours covered by approved LMS permission / half-day / monthly 3h allowance (no deduction)
           deductibleShortfallHours: 0, // of the above, hours NOT covered — these get deducted (incl. LOP beyond 3h monthly cap)
           hourlyDeductionAmount: 0,    // rupee amount deducted for deductibleShortfallHours
-          totalExcessHours: 0           // total hours worked beyond 9h/day across all working days
+          totalExcessHours: 0,          // total hours worked beyond 9h/day across all working days
+          paSlaConsumed: 0             // days of PA/SLA balance actually used this month to avoid a leave deduction
         }
       };
       // Per-hour rate for the new hourly-shortfall deduction, based on a 9-hour working day
@@ -1274,6 +1275,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           } else {
             if (paSlaBalance >= 1) {
               paSlaBalance -= 1;
+              empData.summary.paSlaConsumed += 1;
               paidUnpaid = 'Paid Leave';
             } else {
               paidUnpaid = 'Unpaid Leave';
@@ -1286,6 +1288,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           if (leave && leave.duration && leave.duration.toLowerCase().includes('half')) {
             if (paSlaBalance >= 0.5) {
               paSlaBalance -= 0.5;
+              empData.summary.paSlaConsumed += 0.5;
               halfDayHours = 4;
             } else {
               halfDayHours = 0;
@@ -2066,7 +2069,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
 
     const itemsResult = await payrollClient.query(
       `SELECT pi.*, e.id AS employee_id, e.name AS employee_name, e.email AS employee_email, e.designation AS employee_designation, e.department AS employee_department, e.bank_account AS employee_bank_account, e.pf_number AS employee_pf_number, e.uan_number AS employee_uan_number
-       , e.employee_code AS employee_code, e.ctc AS employee_ctc
+       , e.employee_code AS employee_code, e.ctc AS employee_ctc, e.use_pa_sla AS employee_use_pa_sla, e.pa_sla_balance AS employee_pa_sla_balance
        , ps.status AS payslip_status, ps.hold_reason AS payslip_hold_reason
        FROM payroll_items pi
        JOIN employees e ON e.id = pi.employee_id
@@ -2129,6 +2132,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
                 OR (e.name ILIKE $3 || '%')
                 OR ($3 ILIKE e.name || '%')
               )
+            ORDER BY d
           `;
           const empCode = (item as any).employee_code || '';
           console.log(`[ANALYSIS] LMS query for ${item.employee_name}, code: ${empCode}`);
@@ -2137,22 +2141,36 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
             const allLeaveDates: string[] = [];
             const odDates: string[] = [];
             const halfDayLeaveDates: string[] = [];
+            const paidByBalanceDates: string[] = [];
             let unpaidCount = 0;
             let totalCount = 0;
+            let paSlaConsumed = 0;
             const leaveTypeSummary: string[] = [];
+
+            // Same gating rule used in computePayrollPreviewData (the function that actually
+            // runs at payroll-generation time): a leave day (other than OD/Comp Off) is only
+            // exempt from deduction if the employee's "Use PL/SL" checkbox is ticked AND they
+            // have enough PA/SLA balance left. Balance is consumed day by day in chronological
+            // order (rows are pre-sorted by date via ORDER BY d in the query above).
+            let paSlaBalance = (item as any).employee_use_pa_sla ? Number((item as any).employee_pa_sla_balance || 0) : 0;
 
             for (const row of leaveRes.rows) {
               const d = toLocalDateStr(row.leave_date);
               const dayValue = row.leave_duration_type === 'Half Day' ? 0.5 : 1.0;
               allLeaveDates.push(d);
-              totalCount += dayValue;
               leaveTypeSummary.push(row.leave_type);
               if (row.leave_duration_type === 'Half Day') {
                 halfDayLeaveDates.push(d);
               }
+              const normalizedType = (row.leave_type || '').trim().toLowerCase();
+
               if (row.leave_type === 'OD') {
+                // OD (On Duty) is not leave — it's shown as its own separate line in the UI,
+                // so it must NOT be added to totalCount or the "Leave Taken" figure will
+                // double-count it (once in the total, once again in the "+Xd OD" line).
                 odDates.push(d);
-              } else if ((row.leave_type || '').trim().toLowerCase() === 'comp off') {
+              } else if (normalizedType === 'comp off') {
+                totalCount += dayValue;
                 const coveredDays = parseFloat(row.comp_off_covered_days || '0');
                 if (row.comp_off_uncovered_dates) {
                   const uncoveredDates = row.comp_off_uncovered_dates.split(',').map((s: string) => s.trim());
@@ -2163,7 +2181,17 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
                   unpaidCount += dayValue;
                 }
               } else {
-                unpaidCount += dayValue;
+                totalCount += dayValue;
+                if (paSlaBalance >= dayValue) {
+                  // Checkbox ticked AND enough balance — this day is protected, no deduction.
+                  paSlaBalance -= dayValue;
+                  paSlaConsumed += dayValue;
+                  paidByBalanceDates.push(d);
+                } else {
+                  // Checkbox unticked, or balance exhausted — genuinely unpaid leave,
+                  // regardless of whether it's marked PL/SL in the LMS.
+                  unpaidCount += dayValue;
+                }
               }
             }
 
@@ -2186,7 +2214,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
               }
             }
 
-            console.log(`[ANALYSIS] LMS Match for ${item.employee_name}: ${totalCount} total, ${unpaidCount} unpaid (excl OD), ${odDates.length} OD dates, ${halfDayLeaveDates.length} half-day`);
+            console.log(`[ANALYSIS] LMS Match for ${item.employee_name}: ${totalCount} total, ${unpaidCount} unpaid, ${paSlaConsumed} paid via PA/SLA balance, ${odDates.length} OD dates, ${halfDayLeaveDates.length} half-day`);
             leaveData = {
               unpaid_leaves: unpaidCount,
               total_leaves: totalCount,
@@ -2196,6 +2224,8 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
               half_day_leave_dates: halfDayLeaveDates,
               permission_hours: 0,
               comp_off_uncovered_dates: uncoveredCompOffDates,
+              pa_sla_consumed: paSlaConsumed,
+              paid_by_balance_dates: paidByBalanceDates,
             } as any;
           }
 
@@ -2483,6 +2513,9 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
           ctc: (item as any).employee_ctc,
         },
         unpaid_leaves: leaveData?.unpaid_leaves ?? item.unpaid_leaves,
+        total_leaves: (leaveData as any)?.total_leaves ?? item.unpaid_leaves,
+        paid_leaves: Math.max(0, ((leaveData as any)?.total_leaves ?? item.unpaid_leaves) - (leaveData?.unpaid_leaves ?? item.unpaid_leaves)),
+        pa_sla_consumed: (leaveData as any)?.pa_sla_consumed ?? 0,
         leave_source: leaveData ? `LMS (${(leaveData as any).leave_type})` : 'No LMS leave record',
         leave_type: (leaveData as any)?.leave_type ?? null,
         od_dates: (leaveData as any)?.od_dates ?? [],
