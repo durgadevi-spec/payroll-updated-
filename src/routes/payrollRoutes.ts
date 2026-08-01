@@ -1289,16 +1289,22 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
               halfDayHours = 0;
             }
           }
-          eligibleHours += halfDayHours + permHours;
+          eligibleHours += halfDayHours;
+          let permHoursUsed = 0;
 
           if (totalHours > 0 || halfDayHours > 0 || permHours > 0) {
             if (eligibleHours < 9) {
               const shortfall = 9 - eligibleHours;
               const availableAllowance = 3 - empData.summary.monthlyAllowanceUsed;
               if (availableAllowance > 0) {
-                allowanceUsedToday = Math.min(shortfall, availableAllowance);
-                empData.summary.monthlyAllowanceUsed += allowanceUsedToday;
-                eligibleHours += allowanceUsedToday;
+                const totalCoverage = Math.min(shortfall, availableAllowance);
+                allowanceUsedToday = totalCoverage;
+                empData.summary.monthlyAllowanceUsed += totalCoverage;
+                eligibleHours += totalCoverage;
+                
+                if (permHours > 0) {
+                  permHoursUsed = Math.min(permHours, totalCoverage);
+                }
               }
             }
           }
@@ -1307,7 +1313,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
             paidUnpaid = 'Paid (Working)';
             if (allowanceUsedToday > 0) {
               dedReason = 'Within Monthly 3-Hour Permission Allowance - No Deduction';
-            } else if (permHours > 0) {
+            } else if (permHoursUsed > 0) {
               dedReason = 'Approved Permission - No Deduction';
             } else if (halfDayHours > 0) {
               dedReason = 'Approved Half-Day Leave - No Deduction';
@@ -1332,7 +1338,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
                 hourlyDeductionToday = Math.round(remainingShort * perHourSalaryForDed * 100) / 100;
                 paidUnpaid = 'Partially Paid (Hourly Deduction)';
                 isDeductible = false; // day itself is still "attended"; deduction is hour-based, not day-based
-                if (permHours === 0 && halfDayHours === 0 && allowanceUsedToday === 0) {
+                if (permHoursUsed === 0 && halfDayHours === 0 && allowanceUsedToday === 0) {
                   dedReason = `${remainingShort.toFixed(2)}h short of 9h, no LMS permission — Hourly Salary Deduction`;
                 } else if (empData.summary.monthlyAllowanceUsed >= 3) {
                   dedReason = `${remainingShort.toFixed(2)}h short beyond 3-Hour Monthly Permission Limit — LOP (Hourly Deduction)`;
@@ -1362,7 +1368,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           empData.summary.permissionCoveredHours += Math.max(0, rawShort - deductibleShortHoursToday);
         }
 
-        if (permHours > 0) empData.summary.approvedPermissionHours += permHours;
+        if (permHoursUsed > 0) empData.summary.approvedPermissionHours += permHoursUsed;
         if (halfDayHours > 0) empData.summary.halfDayLeaves++;
         if (isDeductible && dedReason === 'Monthly 3-Hour Permission Limit Exceeded - Deductible') {
           empData.summary.permissionLimitExceededDays++;
@@ -1386,7 +1392,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           permission_status: perm ? 'Approved' : 'None',
           permission_from: perm?.from_time ? String(perm.from_time).substring(0, 5) : '-',
           permission_to: perm?.to_time ? String(perm.to_time).substring(0, 5) : '-',
-          permission_hours: permHours.toFixed(1),
+          permission_hours: permHoursUsed.toFixed(1),
           monthly_permission_used: allowanceUsedToday.toFixed(2),
           monthly_permission_remaining: Math.max(0, 3 - empData.summary.monthlyAllowanceUsed).toFixed(2),
           half_day_leave_status: halfDayHours > 0 ? 'Approved (4h)' : 'None',
