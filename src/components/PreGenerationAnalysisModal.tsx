@@ -52,7 +52,29 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
   const [error, setError] = useState<string | null>(null);
   const [activeEmpIdx, setActiveEmpIdx] = useState(0);
   const [showStats, setShowStats] = useState(false);
+  const [empDropdownOpen, setEmpDropdownOpen] = useState(false);
+  const [empSearch, setEmpSearch] = useState('');
+  const [selectedEmpIndices, setSelectedEmpIndices] = useState<Set<number>>(new Set());
   const lastFetchKey = useRef<string>('');
+  const empDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Initialize selectedEmpIndices when data loads
+  useEffect(() => {
+    if (data?.employees?.length) {
+      setSelectedEmpIndices(new Set(data.employees.map((_: any, i: number) => i)));
+    }
+  }, [data]);
+
+  // Close employee dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (empDropdownRef.current && !empDropdownRef.current.contains(e.target as Node)) {
+        setEmpDropdownOpen(false);
+      }
+    }
+    if (empDropdownOpen) document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [empDropdownOpen]);
 
   // Stabilize employeeIds so array reference changes don't re-trigger
   const empIdsKey = JSON.stringify(employeeIds);
@@ -97,6 +119,32 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
 
   const employees = data?.employees || [];
   const emp = employees[activeEmpIdx];
+
+  // Build sorted index map for alphabetical display in dropdown
+  const sortedEmpIndices = employees
+    .map((_: any, i: number) => i)
+    .sort((a: number, b: number) => (employees[a]?.name || '').localeCompare(employees[b]?.name || ''));
+
+  // Get ordered list of selected indices for prev/next navigation
+  const selectedList = sortedEmpIndices.filter((i: number) => selectedEmpIndices.has(i));
+  const currentPosInSelected = selectedList.indexOf(activeEmpIdx);
+
+  const toggleEmpSelection = (idx: number) => {
+    setSelectedEmpIndices(prev => {
+      const next = new Set(prev);
+      if (next.has(idx)) {
+        next.delete(idx);
+        // If we just deselected the active employee, jump to the next selected one
+        if (idx === activeEmpIdx && next.size > 0) {
+          const remaining = sortedEmpIndices.filter((i: number) => next.has(i));
+          setActiveEmpIdx(remaining[0]);
+        }
+      } else {
+        next.add(idx);
+      }
+      return next;
+    });
+  };
 
   const wrapperClass = fullPage
     ? 'fixed inset-0 z-50 flex items-stretch justify-center bg-slate-900/50 backdrop-blur-sm overflow-hidden'
@@ -151,33 +199,144 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
             <div className="flex items-center justify-center py-20 text-slate-400 text-sm">No data available for the selected period.</div>
           ) : (
             <>
-              {/* ── Employee Tabs ── */}
+              {/* ── Employee Selector & Selected Tabs ── */}
               {employees.length > 1 && (
-                <div className="flex gap-0.5 px-4 border-b border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/30 overflow-x-auto flex-shrink-0">
-                  {employees.map((e: any, i: number) => (
+                <div className="relative px-4 py-2.5 border-b border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/30 flex-shrink-0 flex items-center gap-3" ref={empDropdownRef}>
+                  
+                  {/* Select Employees Dropdown */}
+                  <div className="relative flex-shrink-0">
                     <button
-                      key={e.id}
-                      onClick={() => setActiveEmpIdx(i)}
-                      className={`relative flex items-center gap-2 px-3.5 py-2.5 text-[13px] font-medium transition-colors whitespace-nowrap ${i === activeEmpIdx
-                        ? 'text-indigo-600 dark:text-indigo-400'
-                        : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
-                        }`}
+                      onClick={() => { setEmpDropdownOpen(o => !o); setEmpSearch(''); }}
+                      className="flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-indigo-300 dark:hover:border-indigo-600 transition-colors"
                     >
-                      <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-semibold ${i === activeEmpIdx
-                        ? 'bg-indigo-600 text-white'
-                        : 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
-                        }`}>
-                        {e.name.charAt(0).toUpperCase()}
-                      </span>
-                      {e.name}
-                      {e.summary.unpaidDays > 0 && (
-                        <span className="text-[10px] font-semibold text-red-600 dark:text-red-400">{e.summary.unpaidDays}</span>
-                      )}
-                      {i === activeEmpIdx && (
-                        <span className="absolute left-0 right-0 -bottom-px h-[2px] bg-indigo-600 dark:bg-indigo-400" />
-                      )}
+                      <span className="text-[13px] font-medium text-slate-700 dark:text-slate-200">Select Employees</span>
+                      <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${empDropdownOpen ? 'rotate-180' : ''}`} />
                     </button>
-                  ))}
+                    
+                    {/* Dropdown panel */}
+                    {empDropdownOpen && (
+                      <div className="absolute left-0 top-full mt-2 w-[480px] bg-white dark:bg-slate-800 rounded-lg shadow-xl ring-1 ring-black/10 dark:ring-white/10 z-50 flex flex-col" style={{ maxHeight: '520px' }}>
+                        {/* Search input + Select All/None */}
+                        <div className="p-2.5 border-b border-slate-100 dark:border-slate-700 flex flex-col gap-2">
+                          <input
+                            type="text"
+                            autoFocus
+                            value={empSearch}
+                            onChange={(e) => setEmpSearch(e.target.value)}
+                            placeholder="Search employee…"
+                            className="w-full px-3 py-2 text-sm rounded-md border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                          />
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] text-slate-400">{selectedEmpIndices.size} selected</span>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => setSelectedEmpIndices(new Set(employees.map((_: any, i: number) => i)))}
+                                className="text-[11px] font-medium text-indigo-600 dark:text-indigo-400 hover:underline"
+                              >Select All</button>
+                              <button
+                                onClick={() => { setSelectedEmpIndices(new Set([activeEmpIdx])); }}
+                                className="text-[11px] font-medium text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 hover:underline"
+                              >Deselect All</button>
+                            </div>
+                          </div>
+                        </div>
+                        {/* Scrollable employee list — alphabetically sorted */}
+                        <div className="overflow-y-auto flex-1" style={{ maxHeight: '440px' }}>
+                          {sortedEmpIndices
+                            .filter((idx: number) => employees[idx].name.toLowerCase().includes(empSearch.toLowerCase()))
+                            .map((idx: number) => {
+                              const e = employees[idx];
+                              const isSelected = selectedEmpIndices.has(idx);
+                              const isActive = idx === activeEmpIdx;
+                              return (
+                                <div
+                                  key={e.id}
+                                  className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-left text-[13px] transition-colors cursor-pointer ${
+                                    isActive
+                                      ? 'bg-indigo-50 dark:bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 font-semibold'
+                                      : 'text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700/50'
+                                  }`}
+                                >
+                                  {/* Checkbox for multi-select */}
+                                  <input
+                                    type="checkbox"
+                                    checked={isSelected}
+                                    onChange={() => toggleEmpSelection(idx)}
+                                    className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 flex-shrink-0 cursor-pointer"
+                                  />
+                                  {/* Clickable name area — navigates to this employee */}
+                                  <button
+                                    onClick={() => { setActiveEmpIdx(idx); setEmpDropdownOpen(false); setEmpSearch(''); }}
+                                    className="flex items-center gap-2.5 flex-1 min-w-0"
+                                  >
+                                    <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-semibold flex-shrink-0 ${
+                                      isActive
+                                        ? 'bg-indigo-600 text-white'
+                                        : 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
+                                    }`}>
+                                      {e.name.charAt(0).toUpperCase()}
+                                    </span>
+                                    <span className="truncate flex-1">{e.name}</span>
+                                  </button>
+                                  {e.summary.unpaidDays > 0 && (
+                                    <span className="text-[10px] font-semibold text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/10 px-1.5 py-0.5 rounded flex-shrink-0">{e.summary.unpaidDays}</span>
+                                  )}
+                                  {isActive && (
+                                    <Check className="w-4 h-4 text-indigo-600 dark:text-indigo-400 flex-shrink-0" />
+                                  )}
+                                </div>
+                              );
+                            })
+                          }
+                          {sortedEmpIndices.filter((idx: number) => employees[idx].name.toLowerCase().includes(empSearch.toLowerCase())).length === 0 && (
+                            <p className="text-center text-sm text-slate-400 py-6">No employees found</p>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="w-px h-6 bg-slate-200 dark:bg-slate-700 flex-shrink-0" />
+
+                  {/* Horizontally scrolling tabs container */}
+                  <div className="flex items-center gap-1.5 overflow-x-auto flex-1">
+                    {selectedList.map((idx: number) => {
+                      const e = employees[idx];
+                      const isActive = idx === activeEmpIdx;
+                      return (
+                        <button
+                          key={e.id}
+                          onClick={() => setActiveEmpIdx(idx)}
+                          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-[13px] font-medium whitespace-nowrap transition-colors flex-shrink-0 border ${
+                            isActive
+                              ? 'bg-indigo-50 border-indigo-200 text-indigo-700 dark:bg-indigo-500/10 dark:border-indigo-500/30 dark:text-indigo-300'
+                              : 'bg-white border-slate-200 text-slate-600 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 hover:border-indigo-300 dark:hover:border-indigo-600'
+                          }`}
+                        >
+                          <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${
+                            isActive 
+                              ? 'bg-indigo-600 text-white' 
+                              : 'bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-400'
+                          }`}>
+                            {e.name.charAt(0).toUpperCase()}
+                          </span>
+                          {e.name}
+                          {e.summary.unpaidDays > 0 && (
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold flex-shrink-0 ${
+                              isActive 
+                                ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-300' 
+                                : 'bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-400'
+                            }`}>
+                              {e.summary.unpaidDays} ded
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                    {selectedList.length === 0 && (
+                      <span className="text-sm text-slate-500 italic px-2">No employees selected</span>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -492,20 +651,20 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                     })()}
                   </div>
 
-                  {/* ── Employee navigation (if multiple) ── */}
-                  {employees.length > 1 && (
+                  {/* ── Employee navigation (if multiple selected) ── */}
+                  {selectedList.length > 1 && (
                     <div className="px-6 py-2.5 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between flex-shrink-0">
                       <button
-                        onClick={() => setActiveEmpIdx(i => Math.max(0, i - 1))}
-                        disabled={activeEmpIdx === 0}
+                        onClick={() => { if (currentPosInSelected > 0) setActiveEmpIdx(selectedList[currentPosInSelected - 1]); }}
+                        disabled={currentPosInSelected <= 0}
                         className="flex items-center gap-1.5 text-[13px] font-medium text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                       >
                         <ChevronLeft className="w-4 h-4" /> Previous
                       </button>
-                      <span className="text-xs text-slate-400 tabular-nums">{activeEmpIdx + 1} of {employees.length} employees</span>
+                      <span className="text-xs text-slate-400 tabular-nums">{currentPosInSelected + 1} of {selectedList.length} selected</span>
                       <button
-                        onClick={() => setActiveEmpIdx(i => Math.min(employees.length - 1, i + 1))}
-                        disabled={activeEmpIdx === employees.length - 1}
+                        onClick={() => { if (currentPosInSelected < selectedList.length - 1) setActiveEmpIdx(selectedList[currentPosInSelected + 1]); }}
+                        disabled={currentPosInSelected >= selectedList.length - 1}
                         className="flex items-center gap-1.5 text-[13px] font-medium text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                       >
                         Next <ChevronRight className="w-4 h-4" />
