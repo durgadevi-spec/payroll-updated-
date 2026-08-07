@@ -2380,7 +2380,15 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
 
       const leaveMatchedTsDays = finalExcludedDates.length;
 
-      const leaveDeduction = Number(item.leave_deduction) || 0;
+      // IMPORTANT: unpaid_leaves is recalculated live from the LMS (see leaveData above),
+      // so leave_deduction must be recalculated to match it — otherwise the "Xd unpaid"
+      // label and the ₹ deduction can drift apart (e.g. a day that was paid at generation
+      // time later becomes unpaid once PA/SLA balance is exhausted or a leave is edited,
+      // and the stored leave_deduction column never gets updated to reflect that).
+      const liveUnpaidLeaves = leaveData?.unpaid_leaves ?? (Number(item.unpaid_leaves) || 0);
+      const leaveDeduction = Math.round(
+        ((monthlySalary || 0) / (calendarDays || 30)) * liveUnpaidLeaves * 100
+      ) / 100;
       const pfDeduction = Number(item.pf_deduction) || 0;
       const esiDeduction = Number(item.esi_deduction) || 0;
       const taxDeduction = Number(item.tax_deduction) || 0;
@@ -2513,6 +2521,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
           ctc: (item as any).employee_ctc,
         },
         unpaid_leaves: leaveData?.unpaid_leaves ?? item.unpaid_leaves,
+        leave_deduction: leaveDeduction,
         total_leaves: (leaveData as any)?.total_leaves ?? item.unpaid_leaves,
         paid_leaves: Math.max(0, ((leaveData as any)?.total_leaves ?? item.unpaid_leaves) - (leaveData?.unpaid_leaves ?? item.unpaid_leaves)),
         pa_sla_consumed: (leaveData as any)?.pa_sla_consumed ?? 0,
