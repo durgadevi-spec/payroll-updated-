@@ -2376,19 +2376,32 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
         console.log(`[ANALYSIS] ${item.employee_name}: No live TS data — using stored: ${actualMissingTsDays} missing days, deduction=${timesheetDeduction}`);
       }
 
+      // --- Timesheet Exception ---
+      // Admins can waive the deduction for some or all of an employee's missing
+      // timesheet days. 'full' waives the deduction for every missing day found
+      // above (so a fresh refresh with more/fewer missing days still applies the
+      // waiver automatically); 'partial' waives a fixed number of days, capped at
+      // the actual missing day count.
+      const tsExceptionType: string = (item as any).timesheet_exception_type || 'none';
+      const tsExceptionDaysStored = Number((item as any).timesheet_exception_days) || 0;
+      let tsExceptionDaysApplied = 0;
+      if (tsExceptionType === 'full' && actualMissingTsDays > 0) {
+        tsExceptionDaysApplied = actualMissingTsDays;
+      } else if (tsExceptionType === 'partial' && actualMissingTsDays > 0) {
+        tsExceptionDaysApplied = Math.min(tsExceptionDaysStored, actualMissingTsDays);
+      }
+      if (tsExceptionDaysApplied > 0) {
+        const perDayRateForException = (monthlySalary || 0) / (calendarDays || 30);
+        timesheetDeduction = Math.round(
+          (actualMissingTsDays - tsExceptionDaysApplied) * perDayRateForException * 100
+        ) / 100;
+      }
+
       const finalHolidayDates = holidayDatesAll;
 
       const leaveMatchedTsDays = finalExcludedDates.length;
 
-      // IMPORTANT: unpaid_leaves is recalculated live from the LMS (see leaveData above),
-      // so leave_deduction must be recalculated to match it — otherwise the "Xd unpaid"
-      // label and the ₹ deduction can drift apart (e.g. a day that was paid at generation
-      // time later becomes unpaid once PA/SLA balance is exhausted or a leave is edited,
-      // and the stored leave_deduction column never gets updated to reflect that).
-      const liveUnpaidLeaves = leaveData?.unpaid_leaves ?? (Number(item.unpaid_leaves) || 0);
-      const leaveDeduction = Math.round(
-        ((monthlySalary || 0) / (calendarDays || 30)) * liveUnpaidLeaves * 100
-      ) / 100;
+      const leaveDeduction = Number(item.leave_deduction) || 0;
       const pfDeduction = Number(item.pf_deduction) || 0;
       const esiDeduction = Number(item.esi_deduction) || 0;
       const taxDeduction = Number(item.tax_deduction) || 0;
@@ -2521,7 +2534,6 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
           ctc: (item as any).employee_ctc,
         },
         unpaid_leaves: leaveData?.unpaid_leaves ?? item.unpaid_leaves,
-        leave_deduction: leaveDeduction,
         total_leaves: (leaveData as any)?.total_leaves ?? item.unpaid_leaves,
         paid_leaves: Math.max(0, ((leaveData as any)?.total_leaves ?? item.unpaid_leaves) - (leaveData?.unpaid_leaves ?? item.unpaid_leaves)),
         pa_sla_consumed: (leaveData as any)?.pa_sla_consumed ?? 0,
@@ -2535,6 +2547,11 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
         missing_dates: actualMissingDates,
         leave_matched_ts_days: leaveMatchedTsDays,
         timesheet_deduction: timesheetDeduction,
+        timesheet_exception_type: tsExceptionType,
+        timesheet_exception_days: tsExceptionDaysStored,
+        timesheet_exception_days_applied: tsExceptionDaysApplied,
+        timesheet_exception_note: (item as any).timesheet_exception_note || null,
+        timesheet_exception_granted_at: (item as any).timesheet_exception_granted_at || null,
         missing_punches: missingPunchDays,
         missing_punch_deduction: missingPunchDeduction,
         missing_punch_dates: missingPunchDates,
@@ -2694,6 +2711,110 @@ router.patch('/payroll-items/:id', async (req, res) => {
   } catch (err) {
     console.error('Error updating payroll item:', err);
     res.status(500).json({ error: 'Failed to update item' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// Grant, change, or remove a Timesheet Exception for one payroll item.
+// exception_type: 'none' (remove any exception) | 'full' (waive deduction for ALL
+// missing timesheet days) | 'partial' (waive deduction for `exception_days` days,
+// capped at the employee's current missing day count).
+router.patch('/payroll-items/:id/timesheet-exception', async (req, res) => {
+  const { id } = req.params;
+  const { exception_type, exception_days, note, missing_timesheets } = req.body;
+
+  const validTypes = ['none', 'full', 'partial'];
+  const type = validTypes.includes(exception_type) ? exception_type : 'none';
+
+  let client;
+  try {
+    client = await payrollPool.connect();
+
+    const currentRes = await client.query(
+      `SELECT pi.*, p.month, p.year
+       FROM payroll_items pi
+       JOIN payrolls p ON pi.payroll_id = p.id
+       WHERE pi.id = $1`,
+      [id]
+    );
+    const item = currentRes.rows[0];
+    if (!item) return res.status(404).json({ error: 'Item not found' });
+
+    const monthlySalary = parseFloat(item.monthly_salary) || 0;
+    const calendarDays = new Date(parseInt(item.year), parseInt(item.month), 0).getDate();
+    const dayRate = calendarDays > 0 ? monthlySalary / calendarDays : 0;
+
+    // The stored `missing_timesheets` column only reflects the last time
+    // "Refresh External Data" was run, and can be stale/out of sync with what's
+    // currently shown on screen (which comes from the live analysis endpoint).
+    // Trust the value the admin was actually looking at when granting the
+    // exception, if the frontend sends it; fall back to the stored value otherwise.
+    const missingDaysFromBody = missing_timesheets !== undefined ? parseInt(missing_timesheets) : NaN;
+    const missingDays = Number.isFinite(missingDaysFromBody) && missingDaysFromBody >= 0
+      ? missingDaysFromBody
+      : (Number(item.missing_timesheets) || 0);
+
+    const requestedDays = type === 'partial'
+      ? Math.max(0, Math.min(parseFloat(exception_days) || 0, missingDays))
+      : 0;
+
+    if (type === 'partial' && requestedDays <= 0) {
+      return res.status(400).json({ error: `Enter a valid number of exception days (1 to ${missingDays}).` });
+    }
+
+    let exceptionDaysApplied = 0;
+    if (type === 'full') exceptionDaysApplied = missingDays;
+    else if (type === 'partial') exceptionDaysApplied = requestedDays;
+
+    const payableMissingDays = Math.max(0, missingDays - exceptionDaysApplied);
+    const newTsDeduction = Math.round(dayRate * payableMissingDays * 100) / 100;
+
+    // Recompute net salary from the item's other already-stored deductions
+    // (mirrors the logic in PATCH /payroll-items/:id).
+    const leaveDeduction = parseFloat(item.leave_deduction || '0');
+    const missingPunchDeduction = parseFloat(item.missing_punch_deduction || '0');
+    const pfDeduction = parseFloat(item.pf_deduction || '0');
+    const esiDeduction = parseFloat(item.esi_deduction || '0');
+    const taxDeduction = parseFloat(item.tax_deduction || '0');
+    const loanDeduction = parseFloat(item.loan_deduction || '0');
+    const advanceDeduction = parseFloat(item.advance_deduction || '0');
+    const permissionDeduction = parseFloat(item.permission_deduction || '0');
+    const hourlyDeduction = parseFloat(item.hourly_deduction || '0');
+    const bonus = parseFloat(item.bonus || '0');
+    const sundayWorkDays = parseFloat(item.sunday_work_days || '0');
+    const sundayEarnings = Math.round(dayRate * sundayWorkDays * 100) / 100;
+
+    const totalDeductions = leaveDeduction + newTsDeduction + missingPunchDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + advanceDeduction + permissionDeduction + hourlyDeduction;
+    const netSalary = Math.max(0, Math.round((monthlySalary - totalDeductions + bonus + sundayEarnings) * 100) / 100);
+
+    const noteValue = typeof note === 'string' && note.trim() ? note.trim() : null;
+
+    const updateRes = await client.query(
+      `UPDATE payroll_items SET
+        timesheet_exception_type = $1,
+        timesheet_exception_days = $2,
+        timesheet_exception_note = $3,
+        timesheet_exception_granted_at = CASE WHEN $1 = 'none' THEN NULL ELSE now() END,
+        timesheet_deduction = $4,
+        missing_timesheets = $5,
+        net_salary = $6
+       WHERE id = $7 RETURNING *`,
+      [type, exceptionDaysApplied, noteValue, newTsDeduction, missingDays, netSalary, id]
+    );
+
+    await client.query(
+      `UPDATE payrolls
+       SET total_amount = (SELECT COALESCE(SUM(net_salary), 0) FROM payroll_items WHERE payroll_id = $1)
+       WHERE id = $1`,
+      [item.payroll_id]
+
+    );
+
+    res.json({ ...updateRes.rows[0], timesheet_exception_days_applied: exceptionDaysApplied });
+  } catch (err) {
+    console.error('Error setting timesheet exception:', err);
+    res.status(500).json({ error: 'Failed to set timesheet exception' });
   } finally {
     if (client) client.release();
   }

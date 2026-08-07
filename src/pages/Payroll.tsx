@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Calculator, Play, ChevronDown, ChevronUp, CheckCircle2, DollarSign, AlertTriangle, Trash2, Eye, Edit2, FileSpreadsheet, Info, X, RefreshCw, FileText, Maximize2, Minimize2 } from 'lucide-react';
+import { Calculator, Play, ChevronDown, ChevronUp, CheckCircle2, DollarSign, AlertTriangle, Trash2, Eye, Edit2, FileSpreadsheet, Info, X, RefreshCw, FileText, Maximize2, Minimize2, ShieldCheck } from 'lucide-react';
 import { PreGenerationAnalysisModal } from '../components/PreGenerationAnalysisModal';
 import { Payroll as PayrollType, PayrollItem, Employee, Leave, Timesheet } from '../types';
 import { supabase } from '../lib/supabase';
@@ -29,12 +29,26 @@ const safeNumber = (value: any, fallback = 0) => {
   return Number.isFinite(numberValue) ? numberValue : fallback;
 };
 
-const getTimesheetDeduction = (item: PayrollItemWithEmployee) => {
+const getTimesheetExceptionDaysApplied = (item: PayrollItemWithEmployee) => {
+  const type = (item as any).timesheet_exception_type;
+  if (type === 'full') return safeNumber(item.missing_timesheets, 0);
+  if (type === 'partial') return Math.min(safeNumber((item as any).timesheet_exception_days_applied ?? (item as any).timesheet_exception_days, 0), safeNumber(item.missing_timesheets, 0));
+  return 0;
+};
+
+const getTimesheetPayableMissingDays = (item: PayrollItemWithEmployee) => {
   const missingDays = safeNumber(item.missing_timesheets, 0);
+  return Math.max(0, missingDays - getTimesheetExceptionDaysApplied(item));
+};
+
+const getTimesheetDeduction = (item: PayrollItemWithEmployee) => {
+  const payableDays = getTimesheetPayableMissingDays(item);
   const storedDeduction = safeNumber(item.timesheet_deduction, 0);
 
-  if (missingDays === 0) {
-    return storedDeduction;
+  // No payable missing days (either none were missing, or an exception waived
+  // them all) — nothing should be deducted, regardless of stale stored values.
+  if (payableDays === 0) {
+    return 0;
   }
 
   if (storedDeduction > 0) {
@@ -43,7 +57,7 @@ const getTimesheetDeduction = (item: PayrollItemWithEmployee) => {
 
   const days = getItemDaysForRate(item);
   const perDaySalary = days > 0 ? safeNumber(item.monthly_salary, 0) / days : 0;
-  return Math.round(perDaySalary * missingDays * 100) / 100;
+  return Math.round(perDaySalary * payableDays * 100) / 100;
 };
 
 const getMissingPunchDeduction = (item: PayrollItemWithEmployee) => {
@@ -1208,6 +1222,85 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
   const [holdReasonText, setHoldReasonText] = useState('');
   const [holdingSalary, setHoldingSalary] = useState(false);
   const [releasingItemId, setReleasingItemId] = useState<string | null>(null);
+  const [exceptionModalItem, setExceptionModalItem] = useState<PayrollItemWithEmployee | null>(null);
+  const [exceptionType, setExceptionType] = useState<'full' | 'partial'>('full');
+  const [exceptionDaysInput, setExceptionDaysInput] = useState('');
+  const [exceptionNoteInput, setExceptionNoteInput] = useState('');
+  const [savingException, setSavingException] = useState(false);
+
+  function openExceptionModal(item: PayrollItemWithEmployee) {
+    const currentType = ((item as any).timesheet_exception_type as string) || 'none';
+    setExceptionType(currentType === 'partial' ? 'partial' : 'full');
+    setExceptionDaysInput(currentType === 'partial' ? String((item as any).timesheet_exception_days || '') : '');
+    setExceptionNoteInput((item as any).timesheet_exception_note || '');
+    setExceptionModalItem(item);
+  }
+
+  async function saveTimesheetException() {
+    if (!exceptionModalItem) return;
+    const missingDays = safeNumber(exceptionModalItem.missing_timesheets, 0);
+
+    if (exceptionType === 'partial') {
+      const days = parseFloat(exceptionDaysInput);
+      if (!exceptionDaysInput || isNaN(days) || days <= 0) {
+        showToast('error', 'Enter a valid number of exception days');
+        return;
+      }
+      if (days > missingDays) {
+        showToast('error', `Exception days can't exceed the missing days (${missingDays})`);
+        return;
+      }
+    }
+
+    setSavingException(true);
+    try {
+      const response = await fetch(`/api/payroll-items/${exceptionModalItem.id}/timesheet-exception`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          exception_type: exceptionType,
+          exception_days: exceptionType === 'partial' ? parseFloat(exceptionDaysInput) : 0,
+          note: exceptionNoteInput,
+          // Pass the missing-days count currently shown on screen — the stored
+          // DB value only updates on "Refresh External Data" and can be stale.
+          missing_timesheets: missingDays,
+        }),
+      });
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({} as any));
+        throw new Error(errBody?.error || 'Failed to save exception');
+      }
+      showToast('success', 'Timesheet exception saved — deduction recalculated');
+      setExceptionModalItem(null);
+      onStatusChange?.();
+    } catch (err: any) {
+      showToast('error', err?.message || 'Failed to save timesheet exception');
+    }
+    setSavingException(false);
+  }
+
+  async function removeTimesheetException(item: PayrollItemWithEmployee) {
+    setSavingException(true);
+    try {
+      const response = await fetch(`/api/payroll-items/${item.id}/timesheet-exception`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          exception_type: 'none',
+          exception_days: 0,
+          note: '',
+          missing_timesheets: safeNumber(item.missing_timesheets, 0),
+        }),
+      });
+      if (!response.ok) throw new Error('Failed to remove exception');
+      showToast('success', 'Timesheet exception removed');
+      setExceptionModalItem(null);
+      onStatusChange?.();
+    } catch (err) {
+      showToast('error', 'Failed to remove timesheet exception');
+    }
+    setSavingException(false);
+  }
 
   async function submitHoldSalary() {
     if (!showHoldModalItemId || !holdReasonText.trim() || !month || !year) return;
@@ -1400,10 +1493,27 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                             <Info size={11} />
                           </button>
                         )}
+                        <button
+                          onClick={() => openExceptionModal(item)}
+                          className={`transition-colors ${((item as any).timesheet_exception_type === 'full' || (item as any).timesheet_exception_type === 'partial') ? 'text-emerald-600 hover:text-emerald-800' : 'text-slate-600 hover:text-slate-800'}`}
+                          title="Give timesheet exception (no deduction for excepted days)"
+                        >
+                          <ShieldCheck size={14} />
+                        </button>
                       </div>
                       {showDetails && excluded.length > 0 && (
                         <div className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
                           {excluded.length} excluded ✓
+                        </div>
+                      )}
+                      {(item as any).timesheet_exception_type === 'full' && (
+                        <div className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-0.5 font-medium">
+                          ✓ Full exception
+                        </div>
+                      )}
+                      {(item as any).timesheet_exception_type === 'partial' && getTimesheetExceptionDaysApplied(item) > 0 && (
+                        <div className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-0.5 font-medium">
+                          ✓ {getTimesheetExceptionDaysApplied(item)}d excepted
                         </div>
                       )}
                     </td>
@@ -1546,7 +1656,22 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                             </div>
                           )}
                           <div className="bg-white dark:bg-slate-800 p-2 rounded border border-red-200 dark:border-red-800">
-                            <p className="font-semibold text-red-600 dark:text-red-400 mb-1">⚠ Final TS Deduction ({item.missing_timesheets} days)</p>
+                            <div className="flex items-center justify-between mb-1">
+                              <p className="font-semibold text-red-600 dark:text-red-400">⚠ Final TS Deduction ({getTimesheetPayableMissingDays(item)} of {item.missing_timesheets} days)</p>
+                              <button
+                                onClick={() => openExceptionModal(item)}
+                                className="p-0.5 text-emerald-500 hover:text-emerald-700 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 rounded shrink-0"
+                                title="Give / manage timesheet exception"
+                              >
+                                <ShieldCheck size={12} />
+                              </button>
+                            </div>
+                            {((item as any).timesheet_exception_type === 'full' || (item as any).timesheet_exception_type === 'partial') && (
+                              <div className="text-emerald-600 dark:text-emerald-400 text-[10px] font-medium mb-1">
+                                ✓ Exception granted: {(item as any).timesheet_exception_type === 'full' ? 'all missing days' : `${getTimesheetExceptionDaysApplied(item)} day(s)`} — no deduction
+                                {(item as any).timesheet_exception_note && <span className="italic text-slate-500 dark:text-slate-400"> ("{(item as any).timesheet_exception_note}")</span>}
+                              </div>
+                            )}
                             {finalMissingDates.length > 0
                               ? finalMissingDates.map((d: string) => <div key={d} className="text-red-700 dark:text-red-300">{fmt(d)}</div>)
                               : item.missing_timesheets === 0
@@ -1649,7 +1774,14 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
               <div className="col-span-2 flex gap-2">MONTHLY SAL: <span className="font-semibold text-slate-900 dark:text-white">₹{formatCurrency(salarySlipModal.monthly_salary)}</span></div>
               <div className="col-span-2 flex gap-2">TOTAL DAYS: <span className="font-semibold text-slate-900 dark:text-white">{salarySlipModal.calculation_days || salarySlipModal.working_days || 26}</span></div>
 
-              <div>Timesheet missing days: <span className="font-semibold text-slate-900 dark:text-white">{salarySlipModal.missing_timesheets}</span></div>
+              <div>
+                Timesheet missing days: <span className="font-semibold text-slate-900 dark:text-white">{salarySlipModal.missing_timesheets}</span>
+                {((salarySlipModal as any).timesheet_exception_type === 'full' || (salarySlipModal as any).timesheet_exception_type === 'partial') && (
+                  <span className="ml-2 inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
+                    <ShieldCheck size={11} /> {(salarySlipModal as any).timesheet_exception_type === 'full' ? 'Full exception' : `${getTimesheetExceptionDaysApplied(salarySlipModal)}d excepted`}
+                  </span>
+                )}
+              </div>
               <div>TS Deduction: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency(getTimesheetDeduction(salarySlipModal))}</span></div>
 
               <div>LMS leaves taken: <span className="font-semibold text-slate-900 dark:text-white">{(salarySlipModal as any).total_leaves ?? salarySlipModal.unpaid_leaves}</span></div>
@@ -1792,6 +1924,100 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
             />
           </div>
         </div>
+      </Modal>
+
+      <Modal
+        isOpen={!!exceptionModalItem}
+        onClose={() => setExceptionModalItem(null)}
+        title={`Timesheet Exception${exceptionModalItem?.employee?.name ? ` — ${exceptionModalItem.employee.name}` : ''}`}
+        size="sm"
+        footer={
+          <div className="flex justify-between items-center w-full">
+            <div>
+              {exceptionModalItem && (((exceptionModalItem as any).timesheet_exception_type === 'full' || (exceptionModalItem as any).timesheet_exception_type === 'partial')) && (
+                <Button
+                  variant="outline"
+                  onClick={() => exceptionModalItem && removeTimesheetException(exceptionModalItem)}
+                  disabled={savingException}
+                  className="text-red-600 border-red-200 hover:bg-red-50"
+                >
+                  Remove Exception
+                </Button>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setExceptionModalItem(null)}>Cancel</Button>
+              <Button onClick={saveTimesheetException} disabled={savingException}>
+                {savingException ? 'Saving...' : 'Save Exception'}
+              </Button>
+            </div>
+          </div>
+        }
+      >
+        {exceptionModalItem && (
+          <div className="space-y-4 py-2">
+            <div className="p-3 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-lg">
+              <p className="text-emerald-800 dark:text-emerald-300 text-xs">
+                This employee has <strong>{safeNumber(exceptionModalItem.missing_timesheets, 0)}</strong> missing timesheet day(s) for this payroll.
+                Giving an exception means salary will <strong>not</strong> be deducted for the excepted days.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="flex items-start gap-2 p-2.5 border border-slate-200 dark:border-slate-700 rounded-md cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800">
+                <input
+                  type="radio"
+                  name="exceptionType"
+                  className="mt-0.5"
+                  checked={exceptionType === 'full'}
+                  onChange={() => setExceptionType('full')}
+                />
+                <span className="text-sm text-slate-700 dark:text-slate-300">
+                  <span className="font-medium">Exception for all missing days</span>
+                  <span className="block text-xs text-slate-500 dark:text-slate-400">No timesheet deduction at all for this employee, this payroll.</span>
+                </span>
+              </label>
+
+              <label className="flex items-start gap-2 p-2.5 border border-slate-200 dark:border-slate-700 rounded-md cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800">
+                <input
+                  type="radio"
+                  name="exceptionType"
+                  className="mt-0.5"
+                  checked={exceptionType === 'partial'}
+                  onChange={() => setExceptionType('partial')}
+                />
+                <span className="text-sm text-slate-700 dark:text-slate-300 flex-1">
+                  <span className="font-medium">Exception for a specific number of days</span>
+                  <span className="block text-xs text-slate-500 dark:text-slate-400 mb-1.5">Remaining missing days are still deducted as usual.</span>
+                  {exceptionType === 'partial' && (
+                    <input
+                      type="number"
+                      value={exceptionDaysInput}
+                      onChange={(e) => setExceptionDaysInput(e.target.value)}
+                      min="0"
+                      max={safeNumber(exceptionModalItem.missing_timesheets, 0)}
+                      step="1"
+                      placeholder="Number of days"
+                      className="w-full px-3 py-1.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  )}
+                </span>
+              </label>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Reason (optional)</label>
+              <textarea
+                value={exceptionNoteInput}
+                onChange={(e) => setExceptionNoteInput(e.target.value)}
+                placeholder="e.g. Approved WFH without timesheet access, client-site work..."
+                rows={2}
+                className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              />
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );

@@ -59,6 +59,12 @@ export interface PayrollItem {
   pa_sla_consumed?: number;
   timesheet_excluded_dates?: string[];
   holiday_dates?: string[];
+  // Timesheet Exception: admin-granted waiver of the missing-timesheet deduction
+  timesheet_exception_type?: 'none' | 'full' | 'partial';
+  timesheet_exception_days?: number;
+  timesheet_exception_note?: string | null;
+  timesheet_exception_granted_at?: string | null;
+  timesheet_exception_days_applied?: number;
   calculation_type?: 'monthly' | 'custom' | 'working_days';
   calculation_days?: number;
   permission_hours?: number;
