@@ -1327,6 +1327,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
 
         let eligibleHours = totalHours;
         let halfDayHours = 0;
+        let isUnpaidHalfDay = false;
         let permHours = perm ? perm.hours : 0;
         let allowanceUsedToday = 0;
         let deductibleShortHoursToday = 0;
@@ -1361,7 +1362,6 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           }
         } else {
           // Working Day or Half-Day Leave
-          let isUnpaidHalfDay = false;
           if (leave && leave.duration && leave.duration.toLowerCase().includes('half')) {
             if (paSlaBalance >= 0.5) {
               paSlaBalance -= 0.5;
@@ -1415,7 +1415,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
               // Requirement: deduct salary proportional to the remaining short hours (not a full day),
               // unless the shortfall is fully covered by permission/allowance.
               const remainingShort = Math.round((9 - eligibleHours) * 100) / 100;
-              if (remainingShort > 0.01) {
+              if (remainingShort > 0.01 && !isUnpaidHalfDay) {
                 deductibleShortHoursToday = remainingShort;
                 hourlyDeductionToday = Math.round(remainingShort * perHourSalaryForDed * 100) / 100;
                 paidUnpaid = 'Partially Paid (Hourly Deduction)';
@@ -1448,7 +1448,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           if (totalHours < requiredBiometricHours) {
             const rawShort = Math.round((requiredBiometricHours - totalHours) * 100) / 100;
             empData.summary.totalHoursMissing += rawShort;
-            empData.summary.deductibleShortfallHours += deductibleShortHoursToday;
+            empData.summary.deductibleShortfallHours = Math.round((empData.summary.deductibleShortfallHours + deductibleShortHoursToday) * 100) / 100;
             empData.summary.hourlyDeductionAmount += hourlyDeductionToday;
             empData.summary.permissionCoveredHours += Math.max(0, rawShort - deductibleShortHoursToday);
           }
@@ -1493,7 +1493,8 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           half_day_leave_status: halfDayHours > 0 ? 'Approved (4h)' : 'None',
           eligible_hours: eligibleHours.toFixed(2),
           deductible_short_hours: deductibleShortHoursToday.toFixed(2),
-          hourly_deduction_amount: hourlyDeductionToday
+          hourly_deduction_amount: hourlyDeductionToday,
+          is_unpaid_half_day: isUnpaidHalfDay
         });
       }
 
@@ -2524,6 +2525,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       let missingPunchDays = 0;
       let missingPunchDeduction = 0;
       const missingPunchDates: string[] = [];
+      let missingPunchExceptedDatesApplied: string[] = [];
       const coveredByLeaveDates: string[] = []; // Missing punch days covered by approved leave
       const fullyPunchedDatesSet = new Set();
       const incompletePunchedDatesSet = new Set<string>();
@@ -2581,6 +2583,25 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
           missingPunchDays = missingPunchDates.length;
           const perDaySalary = (monthlySalary || 0) / (calendarDays || 30);
           missingPunchDeduction = Math.round(perDaySalary * missingPunchDays * 100) / 100;
+
+          // --- Missing Punch Exception ---
+          // Admins can waive the deduction for individual missing-punch days
+          // (chosen via checkboxes in the UI). Only dates that are still
+          // actually missing count — if a previously-excepted date is no
+          // longer missing (e.g. attendance data was corrected), it's simply
+          // ignored rather than affecting anything.
+          const mpExceptionDatesRaw = (item as any).missing_punch_exception_dates;
+          const mpExceptionDatesStored: string[] = Array.isArray(mpExceptionDatesRaw)
+            ? mpExceptionDatesRaw
+            : (typeof mpExceptionDatesRaw === 'string' && mpExceptionDatesRaw
+              ? (() => { try { return JSON.parse(mpExceptionDatesRaw); } catch { return []; } })()
+              : []);
+          const mpExceptedSet = new Set(mpExceptionDatesStored);
+          missingPunchExceptedDatesApplied = missingPunchDates.filter((d) => mpExceptedSet.has(d));
+          if (missingPunchExceptedDatesApplied.length > 0) {
+            const payableMissingPunchDays = missingPunchDays - missingPunchExceptedDatesApplied.length;
+            missingPunchDeduction = Math.round(perDaySalary * payableMissingPunchDays * 100) / 100;
+          }
 
           // Sandwich Deduction: if Saturday and Monday have NO punches, deduct Sunday
           for (let d = 2; d <= calendarDays - 1; d++) {
@@ -2676,6 +2697,9 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
         missing_punches: missingPunchDays,
         missing_punch_deduction: missingPunchDeduction,
         missing_punch_dates: missingPunchDates,
+        missing_punch_exception_dates: missingPunchExceptedDatesApplied,
+        missing_punch_exception_note: (item as any).missing_punch_exception_note || null,
+        missing_punch_exception_granted_at: (item as any).missing_punch_exception_granted_at || null,
         incomplete_punch_dates: Array.from(incompletePunchedDatesSet),
         incomplete_punch_times: incompletePunchTimes,
         covered_by_leave_dates: coveredByLeaveDates,
@@ -2949,6 +2973,104 @@ router.patch('/payroll-items/:id/timesheet-exception', async (req, res) => {
   } catch (err) {
     console.error('Error setting timesheet exception:', err);
     res.status(500).json({ error: 'Failed to set timesheet exception' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// Grant, change, or remove a Missing Punch Exception for one payroll item.
+// Unlike the timesheet exception (which is all-or-a-count), this is
+// per-date: admins check off exactly which missing-punch days should be
+// waived from the deduction. `excepted_dates` is the full set of dates that
+// should be excepted going forward (send [] to remove the exception
+// entirely, or the full missing-dates list to except all of them).
+router.patch('/payroll-items/:id/missing-punch-exception', async (req, res) => {
+  const { id } = req.params;
+  const { excepted_dates, note, missing_punch_dates } = req.body;
+
+  if (excepted_dates !== undefined && !Array.isArray(excepted_dates)) {
+    return res.status(400).json({ error: 'excepted_dates must be an array of date strings' });
+  }
+
+  let client;
+  try {
+    client = await payrollPool.connect();
+
+    const currentRes = await client.query(
+      `SELECT pi.*, p.month, p.year
+       FROM payroll_items pi
+       JOIN payrolls p ON pi.payroll_id = p.id
+       WHERE pi.id = $1`,
+      [id]
+    );
+    const item = currentRes.rows[0];
+    if (!item) return res.status(404).json({ error: 'Item not found' });
+
+    const monthlySalary = parseFloat(item.monthly_salary) || 0;
+    const calendarDays = new Date(parseInt(item.year), parseInt(item.month), 0).getDate();
+    const dayRate = calendarDays > 0 ? monthlySalary / calendarDays : 0;
+
+    const payableDays = parseFloat(item.calculation_days) > 0 ? parseFloat(item.calculation_days) : calendarDays;
+    const baseSalaryForPay = dayRate * payableDays;
+
+    // The stored `missing_punch_dates` column only reflects the last time
+    // "Refresh External Data" was run. Trust the list the admin was actually
+    // looking at when granting the exception, if the frontend sends it; fall
+    // back to the stored value otherwise. Only dates that are genuinely in
+    // that missing-punch list can be excepted — arbitrary dates are ignored.
+    const currentMissingDates: string[] = Array.isArray(missing_punch_dates)
+      ? missing_punch_dates
+      : (Array.isArray(item.missing_punch_dates) ? item.missing_punch_dates : []);
+    const currentMissingSet = new Set(currentMissingDates);
+
+    const requestedExceptedDates: string[] = Array.isArray(excepted_dates) ? excepted_dates : [];
+    const validExceptedDates = Array.from(new Set(requestedExceptedDates)).filter((d) => currentMissingSet.has(d));
+
+    const payableMissingPunchDays = Math.max(0, currentMissingDates.length - validExceptedDates.length);
+    const newMpDeduction = Math.round(dayRate * payableMissingPunchDays * 100) / 100;
+
+    // Recompute net salary from the item's other already-stored deductions
+    // (mirrors the logic in the timesheet-exception endpoint above).
+    const leaveDeduction = parseFloat(item.leave_deduction || '0');
+    const tsDeduction = parseFloat(item.timesheet_deduction || '0');
+    const pfDeduction = parseFloat(item.pf_deduction || '0');
+    const esiDeduction = parseFloat(item.esi_deduction || '0');
+    const taxDeduction = parseFloat(item.tax_deduction || '0');
+    const loanDeduction = parseFloat(item.loan_deduction || '0');
+    const advanceDeduction = parseFloat(item.advance_deduction || '0');
+    const permissionDeduction = parseFloat(item.permission_deduction || '0');
+    const hourlyDeduction = parseFloat(item.hourly_deduction || '0');
+    const bonus = parseFloat(item.bonus || '0');
+    const sundayWorkDays = parseFloat(item.sunday_work_days || '0');
+    const sundayEarnings = Math.round(dayRate * sundayWorkDays * 100) / 100;
+
+    const totalDeductions = leaveDeduction + tsDeduction + newMpDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + advanceDeduction + permissionDeduction + hourlyDeduction;
+    const netSalary = Math.max(0, Math.round((baseSalaryForPay - totalDeductions + bonus + sundayEarnings) * 100) / 100);
+
+    const noteValue = typeof note === 'string' && note.trim() ? note.trim() : null;
+
+    const updateRes = await client.query(
+      `UPDATE payroll_items SET
+        missing_punch_exception_dates = $1,
+        missing_punch_exception_note = $2,
+        missing_punch_exception_granted_at = CASE WHEN $3::int = 0 THEN NULL ELSE now() END,
+        missing_punch_deduction = $4,
+        net_salary = $5
+       WHERE id = $6 RETURNING *`,
+      [JSON.stringify(validExceptedDates), noteValue, validExceptedDates.length, newMpDeduction, netSalary, id]
+    );
+
+    await client.query(
+      `UPDATE payrolls
+       SET total_amount = (SELECT COALESCE(SUM(net_salary), 0) FROM payroll_items WHERE payroll_id = $1)
+       WHERE id = $1`,
+      [item.payroll_id]
+    );
+
+    res.json({ ...updateRes.rows[0], missing_punch_exception_dates: validExceptedDates });
+  } catch (err) {
+    console.error('Error setting missing punch exception:', err);
+    res.status(500).json({ error: 'Failed to set missing punch exception' });
   } finally {
     if (client) client.release();
   }

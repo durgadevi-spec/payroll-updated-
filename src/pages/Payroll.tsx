@@ -107,6 +107,10 @@ const getMissingPunchDeduction = (item: PayrollItemWithEmployee) => {
   return Math.round(perDaySalary * missingPunches * 100) / 100;
 };
 
+const getMissingPunchExceptionDates = (item: PayrollItemWithEmployee): string[] => {
+  return (item as any).missing_punch_exception_dates || [];
+};
+
 const getNetSalary = (item: PayrollItemWithEmployee, month?: number, year?: number) => {
   const monthlySalary = safeNumber(item.monthly_salary, 0);
   const leaveDeduction = safeNumber(item.leave_deduction, 0);
@@ -127,7 +131,7 @@ const getNetSalary = (item: PayrollItemWithEmployee, month?: number, year?: numb
   const calculationDays = safeNumber(item.calculation_days, 0);
   const isCustom = item.calculation_type === 'custom';
   const isWorkingDays = item.calculation_type === 'working_days';
-  
+
   let daysToCalculateFor = calendarDays;
   let daysForRate = calendarDays;
 
@@ -1326,6 +1330,10 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
   const [exceptionDaysInput, setExceptionDaysInput] = useState('');
   const [exceptionNoteInput, setExceptionNoteInput] = useState('');
   const [savingException, setSavingException] = useState(false);
+  const [missingPunchExceptionModalItem, setMissingPunchExceptionModalItem] = useState<PayrollItemWithEmployee | null>(null);
+  const [missingPunchExceptionSelectedDates, setMissingPunchExceptionSelectedDates] = useState<Set<string>>(new Set());
+  const [missingPunchExceptionNoteInput, setMissingPunchExceptionNoteInput] = useState('');
+  const [savingMissingPunchException, setSavingMissingPunchException] = useState(false);
 
   function openExceptionModal(item: PayrollItemWithEmployee) {
     const currentType = ((item as any).timesheet_exception_type as string) || 'none';
@@ -1399,6 +1407,80 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
       showToast('error', 'Failed to remove timesheet exception');
     }
     setSavingException(false);
+  }
+
+  // --- Missing Punch Exception (per-date checkboxes) ---
+  function openMissingPunchExceptionModal(item: PayrollItemWithEmployee) {
+    const alreadyExcepted: string[] = (item as any).missing_punch_exception_dates || [];
+    setMissingPunchExceptionSelectedDates(new Set(alreadyExcepted));
+    setMissingPunchExceptionNoteInput((item as any).missing_punch_exception_note || '');
+    setMissingPunchExceptionModalItem(item);
+  }
+
+  function toggleMissingPunchExceptionDate(date: string) {
+    setMissingPunchExceptionSelectedDates(prev => {
+      const next = new Set(prev);
+      if (next.has(date)) next.delete(date);
+      else next.add(date);
+      return next;
+    });
+  }
+
+  function setAllMissingPunchExceptionDates(select: boolean) {
+    if (!missingPunchExceptionModalItem) return;
+    const allDates: string[] = (missingPunchExceptionModalItem as any).missing_punch_dates || [];
+    setMissingPunchExceptionSelectedDates(select ? new Set(allDates) : new Set());
+  }
+
+  async function saveMissingPunchException() {
+    if (!missingPunchExceptionModalItem) return;
+    const allDates: string[] = (missingPunchExceptionModalItem as any).missing_punch_dates || [];
+    setSavingMissingPunchException(true);
+    try {
+      const response = await fetch(`/api/payroll-items/${missingPunchExceptionModalItem.id}/missing-punch-exception`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          excepted_dates: Array.from(missingPunchExceptionSelectedDates),
+          note: missingPunchExceptionNoteInput,
+          // Pass the missing-punch dates currently shown on screen — the stored
+          // DB value only updates on "Refresh External Data" and can be stale.
+          missing_punch_dates: allDates,
+        }),
+      });
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({} as any));
+        throw new Error(errBody?.error || 'Failed to save exception');
+      }
+      showToast('success', 'Missing punch exception saved — deduction recalculated');
+      setMissingPunchExceptionModalItem(null);
+      onStatusChange?.();
+    } catch (err: any) {
+      showToast('error', err?.message || 'Failed to save missing punch exception');
+    }
+    setSavingMissingPunchException(false);
+  }
+
+  async function removeMissingPunchException(item: PayrollItemWithEmployee) {
+    setSavingMissingPunchException(true);
+    try {
+      const response = await fetch(`/api/payroll-items/${item.id}/missing-punch-exception`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          excepted_dates: [],
+          note: '',
+          missing_punch_dates: (item as any).missing_punch_dates || [],
+        }),
+      });
+      if (!response.ok) throw new Error('Failed to remove exception');
+      showToast('success', 'Missing punch exception removed');
+      setMissingPunchExceptionModalItem(null);
+      onStatusChange?.();
+    } catch (err) {
+      showToast('error', 'Failed to remove missing punch exception');
+    }
+    setSavingMissingPunchException(false);
   }
 
   async function submitHoldSalary() {
@@ -1636,6 +1718,13 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                               <Info size={13} />
                             </button>
                           )}
+                          <button
+                            onClick={() => openMissingPunchExceptionModal(item)}
+                            className={`transition-colors ${getMissingPunchExceptionDates(item).length > 0 ? 'text-emerald-600 hover:text-emerald-800' : 'text-slate-600 hover:text-slate-800'}`}
+                            title="Give missing punch exception (no deduction for selected days)"
+                          >
+                            <ShieldCheck size={14} />
+                          </button>
                         </div>
                         {(() => {
                           const incompleteDates = (item as any).incomplete_punch_dates || [];
@@ -1655,6 +1744,11 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                             </div>
                           );
                         })()}
+                        {getMissingPunchExceptionDates(item).length > 0 && (
+                          <div className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-0.5 font-medium">
+                            ✓ {getMissingPunchExceptionDates(item).length}d excepted
+                          </div>
+                        )}
                       </div>
                     </td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 text-red-500">-{formatCurrency(getMissingPunchDeduction(item))}</td>
@@ -1787,15 +1881,31 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                             }
                           </div>
                           <div className="bg-orange-50 dark:bg-orange-900/20 p-2 rounded border border-orange-200 dark:border-orange-800">
-                            <p className="font-semibold text-orange-600 dark:text-orange-400 mb-1">🔴 Missing/Incomplete Punches ({((item as any).missing_punches || 0) + ((item as any).covered_by_leave_dates || []).length} days)</p>
+                            <div className="flex items-center justify-between mb-1">
+                              <p className="font-semibold text-orange-600 dark:text-orange-400">🔴 Missing/Incomplete Punches ({((item as any).missing_punches || 0) + ((item as any).covered_by_leave_dates || []).length} days)</p>
+                              <button
+                                onClick={() => openMissingPunchExceptionModal(item)}
+                                className="p-0.5 text-emerald-500 hover:text-emerald-700 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 rounded shrink-0"
+                                title="Give / manage missing punch exception"
+                              >
+                                <ShieldCheck size={12} />
+                              </button>
+                            </div>
                             <p className="text-[9px] text-slate-400 mb-1">No biometric punch (or single punch) & no LMS leave → salary deducted</p>
+                            {getMissingPunchExceptionDates(item).length > 0 && (
+                              <div className="text-emerald-600 dark:text-emerald-400 text-[10px] font-medium mb-1">
+                                ✓ Exception granted: {getMissingPunchExceptionDates(item).length} day(s) — no deduction
+                                {(item as any).missing_punch_exception_note && <span className="italic text-slate-500 dark:text-slate-400"> ("{(item as any).missing_punch_exception_note}")</span>}
+                              </div>
+                            )}
                             {((item as any).missing_punch_dates || []).length > 0
                               ? ((item as any).missing_punch_dates as string[]).map((d: string) => {
                                 const isIncomplete = ((item as any).incomplete_punch_dates || []).includes(d);
                                 const isHalfDay = ((item as any).half_day_leave_dates || []).includes(d);
+                                const isExcepted = getMissingPunchExceptionDates(item).includes(d);
                                 return (
-                                  <div key={d} className="text-orange-700 dark:text-orange-300">
-                                    {fmt(d)} {isIncomplete && <span className="text-amber-600 text-[9px] font-bold">(⚠️ Incomplete)</span>} {isHalfDay && <span className="text-blue-600 text-[9px] font-bold">(½ Half Day)</span>}
+                                  <div key={d} className={isExcepted ? 'text-emerald-600 dark:text-emerald-400' : 'text-orange-700 dark:text-orange-300'}>
+                                    {fmt(d)} {isIncomplete && <span className="text-amber-600 text-[9px] font-bold">(⚠️ Incomplete)</span>} {isHalfDay && <span className="text-blue-600 text-[9px] font-bold">(½ Half Day)</span>} {isExcepted && <span className="text-emerald-600 text-[9px] font-bold">✓ Excepted — no ded.</span>}
                                   </div>
                                 );
                               })
@@ -1902,7 +2012,14 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
 
               <div className="col-span-2 flex gap-2">leave deduction: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency(salarySlipModal.leave_deduction)}</span></div>
 
-              <div>punch Missing: <span className="font-semibold text-slate-900 dark:text-white">{(salarySlipModal as any).missing_punches || 0}</span></div>
+              <div>
+                punch Missing: <span className="font-semibold text-slate-900 dark:text-white">{(salarySlipModal as any).missing_punches || 0}</span>
+                {getMissingPunchExceptionDates(salarySlipModal).length > 0 && (
+                  <span className="ml-2 inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
+                    <ShieldCheck size={11} /> {getMissingPunchExceptionDates(salarySlipModal).length}d excepted
+                  </span>
+                )}
+              </div>
               <div>Punch Ded.: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency(getMissingPunchDeduction(salarySlipModal))}</span></div>
 
               <div>Half day leaves: <span className="font-semibold text-slate-900 dark:text-white">{((salarySlipModal as any).half_day_leave_dates || []).length}</span></div>
@@ -2131,6 +2248,104 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
             </div>
           </div>
         )}
+      </Modal>
+
+      <Modal
+        isOpen={!!missingPunchExceptionModalItem}
+        onClose={() => setMissingPunchExceptionModalItem(null)}
+        title={`Missing Punch Exception${missingPunchExceptionModalItem?.employee?.name ? ` — ${missingPunchExceptionModalItem.employee.name}` : ''}`}
+        size="sm"
+        footer={
+          <div className="flex justify-between items-center w-full">
+            <div>
+              {missingPunchExceptionModalItem && getMissingPunchExceptionDates(missingPunchExceptionModalItem).length > 0 && (
+                <Button
+                  variant="outline"
+                  onClick={() => missingPunchExceptionModalItem && removeMissingPunchException(missingPunchExceptionModalItem)}
+                  disabled={savingMissingPunchException}
+                  className="text-red-600 border-red-200 hover:bg-red-50"
+                >
+                  Remove Exception
+                </Button>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setMissingPunchExceptionModalItem(null)}>Cancel</Button>
+              <Button onClick={saveMissingPunchException} disabled={savingMissingPunchException}>
+                {savingMissingPunchException ? 'Saving...' : 'Save Exception'}
+              </Button>
+            </div>
+          </div>
+        }
+      >
+        {missingPunchExceptionModalItem && (() => {
+          const allDates: string[] = (missingPunchExceptionModalItem as any).missing_punch_dates || [];
+          const incompleteDates: string[] = (missingPunchExceptionModalItem as any).incomplete_punch_dates || [];
+          const allSelected = allDates.length > 0 && allDates.every(d => missingPunchExceptionSelectedDates.has(d));
+
+          return (
+            <div className="space-y-4 py-2">
+              <div className="p-3 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-lg">
+                <p className="text-emerald-800 dark:text-emerald-300 text-xs">
+                  This employee has <strong>{allDates.length}</strong> missing punch day(s) for this payroll.
+                  Check the specific day(s) you want to except — salary will <strong>not</strong> be deducted for checked days only.
+                </p>
+              </div>
+
+              {allDates.length === 0 ? (
+                <p className="text-sm text-slate-500 dark:text-slate-400 italic">No missing punch days to except.</p>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest">
+                      Missing Punch Days ({missingPunchExceptionSelectedDates.size} of {allDates.length} selected)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setAllMissingPunchExceptionDates(!allSelected)}
+                      className="text-xs font-medium text-emerald-600 hover:text-emerald-800"
+                    >
+                      {allSelected ? 'Clear all' : 'Select all'}
+                    </button>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto space-y-1.5 pr-1">
+                    {allDates.map((d) => {
+                      const isIncomplete = incompleteDates.includes(d);
+                      const checked = missingPunchExceptionSelectedDates.has(d);
+                      return (
+                        <label
+                          key={d}
+                          className={`flex items-center gap-2 p-2 border rounded-md cursor-pointer transition-colors ${checked ? 'border-emerald-300 bg-emerald-50 dark:bg-emerald-900/20 dark:border-emerald-800' : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleMissingPunchExceptionDate(d)}
+                          />
+                          <span className="text-sm text-slate-700 dark:text-slate-300">
+                            {new Date(d).toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' })}
+                            {isIncomplete && <span className="text-amber-600 font-medium ml-2 text-xs">(⚠️ Incomplete Punch)</span>}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Reason (optional)</label>
+                <textarea
+                  value={missingPunchExceptionNoteInput}
+                  onChange={(e) => setMissingPunchExceptionNoteInput(e.target.value)}
+                  placeholder="e.g. Biometric device offline that day, approved WFH..."
+                  rows={2}
+                  className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+            </div>
+          );
+        })()}
       </Modal>
     </div>
   );

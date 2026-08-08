@@ -44,6 +44,11 @@ export interface PayrollItem {
   timesheet_deduction: number;
   missing_punches?: number;
   missing_punch_deduction?: number;
+  missing_punch_dates?: string[];
+  // Missing Punch Exception: admin-granted, per-date waiver of the missing-punch deduction
+  missing_punch_exception_dates?: string[];
+  missing_punch_exception_note?: string | null;
+  missing_punch_exception_granted_at?: string | null;
   pf_deduction: number;
   esi_deduction: number;
   tax_deduction: number;
