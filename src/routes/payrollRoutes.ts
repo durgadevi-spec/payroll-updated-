@@ -180,6 +180,25 @@ router.delete('/departments/:id', async (req, res) => {
 });
 
 // ─── Payroll Processing Routes ────────────────────────────────────────────────
+// Given an employee's joining_date ('YYYY-MM-DD') and a payroll month/year,
+// returns how many of that month's calendar days the employee was actually
+// employed for. Mirrors the identical helper in src/pages/Payroll.tsx so the
+// dashboard projection and the real generated payslip always agree.
+function getEligibleDaysForMonthServer(
+  joiningDate: string | null | undefined,
+  month: number,
+  year: number,
+  calendarDays: number
+): number {
+  if (!joiningDate) return calendarDays;
+  const parts = String(joiningDate).split('-').map(Number);
+  if (parts.length !== 3 || parts.some((n) => isNaN(n))) return calendarDays;
+  const [jy, jm, jd] = parts;
+  if (jy < year || (jy === year && jm < month)) return calendarDays; // joined before this month
+  if (jy > year || (jy === year && jm > month)) return 0; // joins in a future month
+  return Math.max(0, calendarDays - jd + 1); // joined during this month
+}
+
 router.get('/payroll-processing', async (req, res) => {
   const { month, year } = req.query;
   if (!month || !year) return res.status(400).json({ error: 'Month and year are required' });
@@ -190,7 +209,7 @@ router.get('/payroll-processing', async (req, res) => {
     tClient = timesheetPool ? await timesheetPool.connect() : null;
 
     // 1. Get all active employees
-    const empRes = await pClient.query('SELECT id, name, email, designation, department, employee_code, ctc FROM employees WHERE status = \'active\'');
+    const empRes = await pClient.query('SELECT id, name, email, designation, department, employee_code, ctc, TO_CHAR(joining_date, \'YYYY-MM-DD\') AS joining_date FROM employees WHERE status = \'active\'');
     const employees = empRes.rows;
 
     // 1b. Fetch payroll settings (PF/ESI/Tax) and active advances so the projected salary
@@ -423,6 +442,12 @@ router.get('/payroll-processing', async (req, res) => {
       const monthlySalary = (Number(emp.ctc || 0) / 12);
       const calendarDays = new Date(Number(year), Number(month), 0).getDate();
 
+      // Mid-month joiner handling: prorate the projected salary the same way the
+      // real generation step does, so this dashboard number isn't misleading for
+      // employees who joined partway through the month.
+      const eligibleDays = getEligibleDaysForMonthServer(emp.joining_date, Number(month), Number(year), calendarDays);
+      const isMidMonthJoiner = eligibleDays < calendarDays;
+
       const summary = previewSummaryMap.get(emp.id);
       let projectedNetSalary: number;
 
@@ -450,9 +475,16 @@ router.get('/payroll-processing', async (req, res) => {
           taxRate,
           loanDeduction: 0,
           advanceDeduction,
-          sundayDeductions
+          sundayDeductions,
+          calculationType: isMidMonthJoiner ? 'custom' : 'monthly',
+          customDays: isMidMonthJoiner ? eligibleDays : 0
         });
         projectedNetSalary = calc.netSalary;
+      } else if (isMidMonthJoiner) {
+        // Fallback for mid-month joiners when preview data is unavailable —
+        // still prorate to eligible days instead of showing a full month's pay.
+        const dayRate = monthlySalary / calendarDays;
+        projectedNetSalary = Math.max(0, dayRate * eligibleDays);
       } else {
         // Fallback if the preview data couldn't be computed (e.g. LMS unavailable) —
         // same simple fallback as before, so the panel never breaks.
@@ -470,6 +502,8 @@ router.get('/payroll-processing', async (req, res) => {
         permissionHours,
         monthlySalary: Math.round(monthlySalary),
         projectedNetSalary: Math.round(projectedNetSalary),
+        isMidMonthJoiner,
+        eligibleDays: isMidMonthJoiner ? eligibleDays : null,
         status: ps?.status || 'NOT_GENERATED',
         holdReason: ps?.hold_reason || null
       };
@@ -642,7 +676,14 @@ router.get('/employees', async (_req, res) => {
   try {
     client = await payrollPool.connect();
     console.log('Fetching employees from payroll DB...');
-    const result = await client.query('SELECT * FROM employees ORDER BY created_at DESC');
+    // TO_CHAR(...) overrides the raw `*` joining_date column with a plain
+    // 'YYYY-MM-DD' string (last column wins when pg builds the row object).
+    // Without this, node-postgres returns a Date, which JSON-serializes to a
+    // full ISO timestamp that <input type="date"> can't parse — so the
+    // Joining Date field silently shows blank when reopening Edit Employee.
+    const result = await client.query(
+      `SELECT *, TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date FROM employees ORDER BY created_at DESC`
+    );
     console.log(`Found ${result.rows.length} employees`);
     res.json(result.rows);
   } catch (error) {
@@ -681,7 +722,7 @@ router.post('/employees', async (req, res) => {
     client = await payrollPool.connect();
     const insert = await client.query(
       `INSERT INTO employees (name, email, employee_code, ctc, reporting_manager, department, designation, joining_date, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING *`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING *, TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date`,
       [name, email, employee_code || null, ctc, reporting_manager, department, designation, validJoiningDate, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance]
     );
 
@@ -729,7 +770,7 @@ router.put('/employees/:id', async (req, res) => {
     client = await payrollPool.connect();
     const update = await client.query(
       `UPDATE employees SET name=$1, email=$2, employee_code=$3, ctc=$4, reporting_manager=$5, department=$6, designation=$7, joining_date=$8, bank_name=$9, bank_account=$10, ifsc_code=$11, pf_number=$12, esi_number=$13, uan_number=$14, status=$15, use_pa_sla=$16, pa_sla_balance=$17, updated_at=NOW()
-       WHERE id=$18 RETURNING *`,
+       WHERE id=$18 RETURNING *, TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date`,
       [name, email, employee_code || null, ctc, reporting_manager, department, designation, validJoiningDate, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance, id]
     );
 
@@ -997,7 +1038,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
     tsClient = timesheetPool ? await timesheetPool.connect() : null;
 
     // Fetch employees
-    const empRes = await pClient.query('SELECT id, name, email, employee_code, ctc, use_pa_sla, pa_sla_balance FROM employees WHERE id = ANY($1)', [employeeIds]);
+    const empRes = await pClient.query('SELECT id, name, email, employee_code, ctc, use_pa_sla, pa_sla_balance, joining_date FROM employees WHERE id = ANY($1)', [employeeIds]);
     const employees = empRes.rows;
 
     // Helper to format date - Use UTC to avoid timezone shift
@@ -1180,6 +1221,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
         id: emp.id,
         name: emp.name,
         ctc: emp.ctc || 0,
+        joining_date: emp.joining_date ? formatLocalDate(emp.joining_date) : null,
         days: [] as any[],
         summary: {
           totalPayable: 0,
@@ -1217,6 +1259,40 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
         const curr = new Date(year, month - 1, d);
         // Use local date parts since curr is constructed with local year/month/day
         const dStr = `${curr.getFullYear()}-${String(curr.getMonth() + 1).padStart(2, '0')}-${String(curr.getDate()).padStart(2, '0')}`;
+
+        // Employee joined the company after this date — they weren't employed
+        // yet, so this day has no attendance/leave/timesheet expectation and
+        // must not count toward payable days or any deduction.
+        if (empData.joining_date && dStr < empData.joining_date) {
+          empData.days.push({
+            date: dStr,
+            day: curr.toLocaleDateString('en-US', { weekday: 'short' }),
+            punch_in: '-',
+            punch_out: '-',
+            total_hours: '0.0',
+            required_hours: 9,
+            attendance_status: 'Not Joined',
+            timesheet_status: 'N/A',
+            lms_leave_status: 'N/A',
+            leave_type: '-',
+            paid_unpaid: 'Not Joined',
+            salary_deduction_applicable: false,
+            deduction_reason: 'Before joining date',
+            sunday_sandwich: false,
+            permission_status: 'None',
+            permission_from: '-',
+            permission_to: '-',
+            permission_hours: '0.0',
+            monthly_permission_used: '0.00',
+            monthly_permission_remaining: '3.00',
+            half_day_leave_status: 'None',
+            eligible_hours: '0.00',
+            deductible_short_hours: '0.00',
+            hourly_deduction_amount: 0
+          });
+          continue;
+        }
+
         const isSunday = curr.getDay() === 0;
         const isSaturday = curr.getDay() === 6;
         const isHoliday = holidaySet.has(dStr);
@@ -1285,13 +1361,15 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           }
         } else {
           // Working Day or Half-Day Leave
+          let isUnpaidHalfDay = false;
           if (leave && leave.duration && leave.duration.toLowerCase().includes('half')) {
             if (paSlaBalance >= 0.5) {
               paSlaBalance -= 0.5;
               empData.summary.paSlaConsumed += 0.5;
               halfDayHours = 4;
             } else {
-              halfDayHours = 0;
+              halfDayHours = 4; // Treat as if they were granted the 4 hours so the biometric check doesn't double penalize
+              isUnpaidHalfDay = true;
             }
           }
           eligibleHours += halfDayHours;
@@ -1386,6 +1464,11 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           empData.summary.permissionLimitExceededDays++;
         }
 
+        if (isUnpaidHalfDay) {
+          paidUnpaid = 'Partially Paid (Unpaid Half Leave)';
+          dedReason = (dedReason && dedReason !== 'Approved Half-Day Leave - No Deduction') ? dedReason + ' | Unpaid Half-Day Leave - 0.5 Day Deducted' : 'Unpaid Half-Day Leave - 0.5 Day Deducted';
+        }
+
         empData.days.push({
           date: dStr,
           day: curr.toLocaleDateString('en-US', { weekday: 'short' }),
@@ -1433,12 +1516,19 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
       // Compute Summaries
       let dedCount = 0;
       for (const day of empData.days) {
+        if (day.attendance_status === 'Not Joined') {
+          // Before the employee's joining date — excluded entirely, not payable and not deductible.
+          continue;
+        }
         if (day.salary_deduction_applicable) {
           empData.summary.unpaidDays++;
           if (day.sunday_sandwich) empData.summary.sundayDeductions++;
           else if (day.attendance_status === 'Less Than 9 Hours') empData.summary.lessThan9++;
           else if (!day.paid_unpaid.includes('Leave')) empData.summary.punchMissing++;
         } else {
+          if (day.is_unpaid_half_day) {
+            empData.summary.unpaidDays += 0.5;
+          }
           empData.summary.totalPayable++;
           if (day.paid_unpaid.includes('Leave') && day.paid_unpaid.includes('Paid')) {
             empData.summary.paidLeaves++;
@@ -2069,7 +2159,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
 
     const itemsResult = await payrollClient.query(
       `SELECT pi.*, e.id AS employee_id, e.name AS employee_name, e.email AS employee_email, e.designation AS employee_designation, e.department AS employee_department, e.bank_account AS employee_bank_account, e.pf_number AS employee_pf_number, e.uan_number AS employee_uan_number
-       , e.employee_code AS employee_code, e.ctc AS employee_ctc, e.use_pa_sla AS employee_use_pa_sla, e.pa_sla_balance AS employee_pa_sla_balance
+       , e.employee_code AS employee_code, e.ctc AS employee_ctc, e.use_pa_sla AS employee_use_pa_sla, e.pa_sla_balance AS employee_pa_sla_balance, e.joining_date AS employee_joining_date
        , ps.status AS payslip_status, ps.hold_reason AS payslip_hold_reason
        FROM payroll_items pi
        JOIN employees e ON e.id = pi.employee_id
@@ -2100,6 +2190,13 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       const monthlySalary = item.monthly_salary || 0;
       let leaveData: { unpaid_leaves?: number; leave_type?: string; leave_dates?: string[]; od_dates?: string[]; permission_hours?: number } | null = null;
       let tsData: { missing_days?: number; submitted_at?: string | null; missing_dates?: string[]; excluded_dates?: string[] } | null = null;
+
+      // If this employee's joining date falls within the payroll month, don't
+      // count any day before it as a missing timesheet/punch day — they simply
+      // weren't employed yet. Employees who joined before this month are
+      // unaffected (joiningDateStr will be earlier than every date checked).
+      const employeeJoiningDate = (item as any).employee_joining_date;
+      const joiningDateStr: string | null = employeeJoiningDate ? toLocalDateStr(employeeJoiningDate) : null;
 
       // Use stored excluded/holiday dates if already saved (for current payrolls)
       const storedExcludedDates: string[] = (item.timesheet_excluded_dates as any) || [];
@@ -2309,6 +2406,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
                 const dstr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
                 if (dt.getDay() === 0) continue;
                 if (holidaySet.has(dstr)) continue;
+                if (joiningDateStr && dstr < joiningDateStr) continue; // not employed yet
                 if (!workedDatesSet.has(dstr)) missingDates.push(dstr);
               }
               console.log(`[ANALYSIS] ✅ Found ${tsRes.rows.length} worked days for ${item.employee_name}, missing ${missingDates.length}`);
@@ -2326,6 +2424,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
                 const dstr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
                 if (dt.getDay() === 0) continue;
                 if (holidaySet.has(dstr)) continue;
+                if (joiningDateStr && dstr < joiningDateStr) continue; // not employed yet
                 missingDates.push(dstr);
               }
               tsData = {
@@ -2466,6 +2565,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
             const dstr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
             if (dt.getDay() === 0) continue; // Skip Sunday
             if (holidaySet.has(dstr)) continue; // Skip holidays
+            if (joiningDateStr && dstr < joiningDateStr) continue; // Not employed yet
             if (fullyPunchedDatesSet.has(dstr)) continue; // Has full punch, skip
 
             // This day has NO full punch (either no punch or incomplete punch)
@@ -2486,6 +2586,8 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
           for (let d = 2; d <= calendarDays - 1; d++) {
             const dt = new Date(payroll.year, payroll.month - 1, d);
             if (dt.getDay() === 0) { // Sunday
+              const sunStr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+              if (joiningDateStr && sunStr < joiningDateStr) continue; // Not employed yet — never sandwich-deduct a pre-joining Sunday
               const satStr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d - 1).padStart(2, '0')}`;
               const monStr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d + 1).padStart(2, '0')}`;
 
@@ -2493,7 +2595,6 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
               const monNoPunch = !fullyPunchedDatesSet.has(monStr) && !incompletePunchedDatesSet.has(monStr);
 
               if (satNoPunch && monNoPunch) {
-                const sunStr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
                 sandwichDates.push(sunStr);
               }
             }
@@ -2514,9 +2615,28 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
 
       const sundayEarnings = Math.round(((monthlySalary || 0) / (calendarDays || 30)) * (Number(item.sunday_work_days) || 0) * 100) / 100;
       const hourlyDeductionStored = Number(item.hourly_deduction) || 0;
+
+      // Mid-month joiner: shrink the base salary to only the days the employee
+      // was actually employed this month (joining date → month end), the same
+      // way the original generation step does. Without this, an employee who
+      // joined partway through the month would have every attendance/leave
+      // deduction correctly limited to their eligible days, but the base pay
+      // itself would still be the FULL month's salary — wildly overstating
+      // their net salary on this live-recomputed analysis view.
+      const eligibleDaysForPay = (() => {
+        if (!joiningDateStr) return calendarDays;
+        const parts = joiningDateStr.split('-').map(Number);
+        if (parts.length !== 3 || parts.some((n) => isNaN(n))) return calendarDays;
+        const [jy, jm, jd] = parts;
+        if (jy < payroll.year || (jy === payroll.year && jm < payroll.month)) return calendarDays; // joined before this month
+        if (jy > payroll.year || (jy === payroll.year && jm > payroll.month)) return 0; // joins in a future month
+        return Math.max(0, calendarDays - jd + 1); // joined during this month
+      })();
+      const baseSalaryForPay = ((monthlySalary || 0) / (calendarDays || 30)) * eligibleDaysForPay;
+
       const netSalary = Math.max(
         0,
-        Math.round((monthlySalary - leaveDeduction - timesheetDeduction - missingPunchDeduction - sandwichDeductionAmount - permissionDeduction - hourlyDeductionStored - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction + bonus + sundayEarnings) * 100) / 100
+        Math.round((baseSalaryForPay - leaveDeduction - timesheetDeduction - missingPunchDeduction - sandwichDeductionAmount - permissionDeduction - hourlyDeductionStored - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction + bonus + sundayEarnings) * 100) / 100
       );
 
       enriched.push({
@@ -2532,6 +2652,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
           uan_number: item.employee_uan_number,
           employee_code: (item as any).employee_code,
           ctc: (item as any).employee_ctc,
+          joining_date: joiningDateStr,
         },
         unpaid_leaves: leaveData?.unpaid_leaves ?? item.unpaid_leaves,
         total_leaves: (leaveData as any)?.total_leaves ?? item.unpaid_leaves,
@@ -2642,6 +2763,13 @@ router.patch('/payroll-items/:id', async (req, res) => {
     const calendarDays = new Date(parseInt(item.year), parseInt(item.month), 0).getDate();
     const dayRate = monthlySalary / calendarDays;
 
+    // Mid-month joiners were generated with a prorated base salary (calculation_days
+    // holds however many days they were actually employed that month). Editing bonus/
+    // Sunday work/etc. here must keep using that same shrunk base — otherwise saving
+    // any edit on a new joiner's payslip would silently restore their full month's pay.
+    const payableDays = parseFloat(item.calculation_days) > 0 ? parseFloat(item.calculation_days) : calendarDays;
+    const baseSalaryForPay = dayRate * payableDays;
+
     const finalLeaveDeduction = leave_deduction !== undefined ? parseFloat(leave_deduction) : parseFloat(item.leave_deduction || '0');
     const tsDeduction = timesheet_deduction !== undefined ? parseFloat(timesheet_deduction) : parseFloat(item.timesheet_deduction || '0');
     const mpDeduction = missing_punch_deduction !== undefined ? parseFloat(missing_punch_deduction) : parseFloat(item.missing_punch_deduction || '0');
@@ -2658,7 +2786,7 @@ router.patch('/payroll-items/:id', async (req, res) => {
     const newHourlyDeduction = hourly_deduction !== undefined ? parseFloat(hourly_deduction) : parseFloat(item.hourly_deduction || 0);
 
     const totalDeductions = finalLeaveDeduction + tsDeduction + mpDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + storedAdvance + newPermissionDeduction + newHourlyDeduction;
-    const netSalary = Math.max(0, Math.round((monthlySalary - totalDeductions + newBonus + sundayEarnings) * 100) / 100);
+    const netSalary = Math.max(0, Math.round((baseSalaryForPay - totalDeductions + newBonus + sundayEarnings) * 100) / 100);
 
     const updateRes = await client.query(
       `UPDATE payroll_items SET 
@@ -2745,6 +2873,12 @@ router.patch('/payroll-items/:id/timesheet-exception', async (req, res) => {
     const calendarDays = new Date(parseInt(item.year), parseInt(item.month), 0).getDate();
     const dayRate = calendarDays > 0 ? monthlySalary / calendarDays : 0;
 
+    // Mid-month joiners were generated with a prorated base salary (calculation_days
+    // holds however many days they were actually employed). A timesheet exception must
+    // keep using that same shrunk base, not the full month's salary.
+    const payableDays = parseFloat(item.calculation_days) > 0 ? parseFloat(item.calculation_days) : calendarDays;
+    const baseSalaryForPay = dayRate * payableDays;
+
     // The stored `missing_timesheets` column only reflects the last time
     // "Refresh External Data" was run, and can be stale/out of sync with what's
     // currently shown on screen (which comes from the live analysis endpoint).
@@ -2786,7 +2920,7 @@ router.patch('/payroll-items/:id/timesheet-exception', async (req, res) => {
     const sundayEarnings = Math.round(dayRate * sundayWorkDays * 100) / 100;
 
     const totalDeductions = leaveDeduction + newTsDeduction + missingPunchDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + advanceDeduction + permissionDeduction + hourlyDeduction;
-    const netSalary = Math.max(0, Math.round((monthlySalary - totalDeductions + bonus + sundayEarnings) * 100) / 100);
+    const netSalary = Math.max(0, Math.round((baseSalaryForPay - totalDeductions + bonus + sundayEarnings) * 100) / 100);
 
     const noteValue = typeof note === 'string' && note.trim() ? note.trim() : null;
 

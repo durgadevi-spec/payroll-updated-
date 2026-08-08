@@ -29,6 +29,36 @@ const safeNumber = (value: any, fallback = 0) => {
   return Number.isFinite(numberValue) ? numberValue : fallback;
 };
 
+// Given an employee's joining_date ('YYYY-MM-DD') and a payroll month/year,
+// returns how many of that month's calendar days the employee was actually
+// employed for. Returns the full calendarDays if they joined before this
+// month (normal case), and a smaller number if they joined mid-month.
+const getEligibleDaysForMonth = (
+  joiningDate: string | null | undefined,
+  month: number,
+  year: number,
+  calendarDays: number
+): number => {
+  if (!joiningDate) return calendarDays;
+  const parts = joiningDate.split('-').map(Number);
+  if (parts.length !== 3 || parts.some(isNaN)) return calendarDays;
+  const [jy, jm, jd] = parts;
+  if (jy < year || (jy === year && jm < month)) return calendarDays; // joined before this month
+  if (jy > year || (jy === year && jm > month)) return 0; // joins in a future month
+  return Math.max(0, calendarDays - jd + 1); // joined during this month
+};
+
+// Whether a payroll item belongs to an employee who joined mid-way through
+// this specific payroll month (used to show a "New joiner" indicator).
+const isMidMonthJoinerItem = (item: PayrollItemWithEmployee, month?: number, year?: number): boolean => {
+  if (!month || !year) return false;
+  const joiningDate = item.employee?.joining_date;
+  if (!joiningDate) return false;
+  const calendarDays = new Date(year, month, 0).getDate();
+  const eligibleDays = getEligibleDaysForMonth(joiningDate, month, year, calendarDays);
+  return eligibleDays < calendarDays;
+};
+
 const getTimesheetExceptionDaysApplied = (item: PayrollItemWithEmployee) => {
   const type = (item as any).timesheet_exception_type;
   if (type === 'full') return safeNumber(item.missing_timesheets, 0);
@@ -77,7 +107,7 @@ const getMissingPunchDeduction = (item: PayrollItemWithEmployee) => {
   return Math.round(perDaySalary * missingPunches * 100) / 100;
 };
 
-const getNetSalary = (item: PayrollItemWithEmployee) => {
+const getNetSalary = (item: PayrollItemWithEmployee, month?: number, year?: number) => {
   const monthlySalary = safeNumber(item.monthly_salary, 0);
   const leaveDeduction = safeNumber(item.leave_deduction, 0);
   const tsDeduction = getTimesheetDeduction(item);
@@ -91,9 +121,30 @@ const getNetSalary = (item: PayrollItemWithEmployee) => {
   const sandwichDeduction = safeNumber((item as any).sandwich_deduction_amount, 0);
   const hourlyDeduction = safeNumber((item as any).hourly_deduction, 0);
   const bonus = safeNumber(item.bonus, 0);
-  const sundayEarnings = (monthlySalary / getItemDaysForRate(item)) * safeNumber(item.sunday_work_days, 0);
 
-  return Math.max(0, Math.round((monthlySalary - leaveDeduction - tsDeduction - mpDeduction - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction - permissionDeduction - sandwichDeduction - hourlyDeduction + bonus + sundayEarnings) * 100) / 100);
+  // Calculate correct base salary for pay (prorated for mid-month joiner / custom days)
+  const calendarDays = (month && year) ? new Date(year, month, 0).getDate() : 30;
+  const calculationDays = safeNumber(item.calculation_days, 0);
+  const isCustom = item.calculation_type === 'custom';
+  const isWorkingDays = item.calculation_type === 'working_days';
+  
+  let daysToCalculateFor = calendarDays;
+  let daysForRate = calendarDays;
+
+  if (isCustom && calculationDays > 0) {
+    daysToCalculateFor = calculationDays;
+  } else if (isWorkingDays) {
+    const workingDaysCount = safeNumber(item.working_days, 26);
+    daysForRate = workingDaysCount;
+    daysToCalculateFor = workingDaysCount;
+  }
+
+  const perDaySalary = monthlySalary / daysForRate;
+  const baseSalary = perDaySalary * daysToCalculateFor;
+
+  const sundayEarnings = perDaySalary * safeNumber(item.sunday_work_days, 0);
+
+  return Math.max(0, Math.round((baseSalary - leaveDeduction - tsDeduction - mpDeduction - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction - permissionDeduction - sandwichDeduction - hourlyDeduction + bonus + sundayEarnings) * 100) / 100);
 };
 
 export function Payroll() {
@@ -104,6 +155,12 @@ export function Payroll() {
   const [selectedPayroll, setSelectedPayroll] = useState<PayrollType | null>(null);
   const [payrollItems, setPayrollItems] = useState<PayrollItemWithEmployee[]>([]);
   const [loadingItems, setLoadingItems] = useState(false);
+  // Tracks the most recently requested payroll id for loadPayrollItems, so a
+  // slow/out-of-order response for a payroll the user has since navigated
+  // away from can be detected and discarded instead of overwriting the screen.
+  const latestPayrollItemsRequestIdRef = React.useRef<string | null>(null);
+  // Same idea, for the separate "View analysis" modal (loadPayrollAnalysis).
+  const latestAnalysisRequestIdRef = React.useRef<string | null>(null);
   const [analysisPayroll, setAnalysisPayroll] = useState<PayrollType | null>(null);
   const [analysisItems, setAnalysisItems] = useState<(PayrollItemWithEmployee & { leave_source?: string; timesheet_status?: string; timesheet_submitted_at?: string | null })[]>([]);
   const [missingDatesModal, setMissingDatesModal] = useState<{ name: string; dates: string[] } | null>(null);
@@ -169,6 +226,13 @@ export function Payroll() {
   }, [loadPayrolls, loadEmployees]);
 
   async function loadPayrollItems(payrollId: string) {
+    // Guard against out-of-order responses: if the user toggles from one
+    // payroll row to another before the first request finishes, whichever
+    // fetch resolves LAST would otherwise win and silently overwrite the
+    // screen with stale data for a payroll the user is no longer viewing.
+    // Recording the most recently requested id and checking it again when
+    // each response comes back means only the latest request is ever applied.
+    latestPayrollItemsRequestIdRef.current = payrollId;
     setLoadingItems(true);
     try {
       const response = await fetch(`/api/payroll-items/analysis/${payrollId}`);
@@ -177,6 +241,11 @@ export function Payroll() {
         throw new Error(`Failed to load payroll details: ${response.status} ${message}`);
       }
       const data = (await response.json()) as PayrollItemWithEmployee[];
+
+      // Stale response — a newer request has since been made for a different
+      // payroll. Discard this result instead of overwriting current data.
+      if (latestPayrollItemsRequestIdRef.current !== payrollId) return;
+
       setPayrollItems(data || []);
 
       // Recalculate the correct total from the live net_salary values (which apply LMS, PL/SL, permission logic)
@@ -187,12 +256,17 @@ export function Payroll() {
       await supabase.from('payrolls').update({ total_amount: correctTotal }).eq('id', payrollId);
     } catch (error) {
       console.error('Error loading payroll details:', error);
-      setPayrollItems([]);
+      if (latestPayrollItemsRequestIdRef.current === payrollId) {
+        setPayrollItems([]);
+      }
     }
-    setLoadingItems(false);
+    if (latestPayrollItemsRequestIdRef.current === payrollId) {
+      setLoadingItems(false);
+    }
   }
 
   async function loadPayrollAnalysis(payroll: PayrollType) {
+    latestAnalysisRequestIdRef.current = payroll.id;
     setAnalysisPayroll(payroll);
     setAnalysisLoading(true);
 
@@ -203,13 +277,23 @@ export function Payroll() {
         throw new Error(`Failed to load payroll analysis: ${response.status} ${message}`);
       }
       const data = await response.json();
+
+      // Discard stale responses the same way loadPayrollItems does — if the
+      // user opened a different payroll's analysis before this one returned,
+      // this result no longer belongs on screen.
+      if (latestAnalysisRequestIdRef.current !== payroll.id) return;
+
       setAnalysisItems((data as (PayrollItemWithEmployee & { leave_source?: string; timesheet_status?: string; timesheet_submitted_at?: string | null })[]) || []);
     } catch (error) {
       console.error('Error loading payroll analysis:', error);
-      setAnalysisItems([]);
+      if (latestAnalysisRequestIdRef.current === payroll.id) {
+        setAnalysisItems([]);
+      }
     }
 
-    setAnalysisLoading(false);
+    if (latestAnalysisRequestIdRef.current === payroll.id) {
+      setAnalysisLoading(false);
+    }
   }
 
   async function updatePayrollItem() {
@@ -373,6 +457,14 @@ export function Payroll() {
 
         const advanceDeduction = advanceByEmp.get(emp.id) || 0;
 
+        // Mid-month joiner handling: if this employee's joining_date falls
+        // within the payroll month, prorate their base salary to only the
+        // days they were actually employed (joining date → month end), and
+        // make sure attendance/leave/timesheet checks (done upstream, in the
+        // preview data) only counted days from their joining date onward.
+        const eligibleDays = getEligibleDaysForMonth(emp.joining_date, genMonth, genYear, calendarDays);
+        const isMidMonthJoiner = eligibleDays < calendarDays;
+
         const totalUnpaid = emp.summary.unpaidDays || 0;
         const punchMissing = emp.summary.punchMissing || 0;
         const sundayDeductions = emp.summary.sundayDeductions || 0;
@@ -405,8 +497,13 @@ export function Payroll() {
           loanDeduction: 0,
           advanceDeduction,
           sundayWorkDays: 0,
-          calculationType,
-          customDays: calculationType === 'custom' ? parseFloat(customDaysInput) || 0 : 0,
+          // A mid-month joiner always gets prorated by actual calendar days
+          // (joining date → month end), regardless of the batch's chosen
+          // calculation mode — the same approach as a manual "custom days" run.
+          calculationType: isMidMonthJoiner ? 'custom' : calculationType,
+          customDays: isMidMonthJoiner
+            ? eligibleDays
+            : (calculationType === 'custom' ? parseFloat(customDaysInput) || 0 : 0),
           sundayDeductions,
           hourlyDeductionAmount
         });
@@ -434,9 +531,11 @@ export function Payroll() {
           pa_sla_consumed: emp.summary.paSlaConsumed || 0,
           timesheet_excluded_dates: [],
           holiday_dates: [],
-          working_days: calculationType === 'working_days' ? effectiveWorkingDays : calendarDays,
-          calculation_type: calculationType,
-          calculation_days: calculationType === 'custom' ? parseFloat(customDaysInput) || 0 : (calculationType === 'working_days' ? effectiveWorkingDays : calendarDays),
+          working_days: isMidMonthJoiner ? eligibleDays : (calculationType === 'working_days' ? effectiveWorkingDays : calendarDays),
+          calculation_type: isMidMonthJoiner ? 'custom' : calculationType,
+          calculation_days: isMidMonthJoiner
+            ? eligibleDays
+            : (calculationType === 'custom' ? parseFloat(customDaysInput) || 0 : (calculationType === 'working_days' ? effectiveWorkingDays : calendarDays)),
           permission_hours: emp.summary.approvedPermissionHours || 0,
           permission_deduction: calc.permissionDeduction,
           hourly_short_hours: emp.summary.deductibleShortfallHours || 0,
@@ -1447,6 +1546,14 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                       <Badge variant={item.calculation_type === 'monthly' ? 'neutral' : 'info'} size="sm" className="capitalize">
                         {item.calculation_type || 'monthly'}
                       </Badge>
+                      {isMidMonthJoinerItem(item, month, year) && (
+                        <div
+                          className="text-[10px] text-indigo-600 dark:text-indigo-400 font-medium mt-0.5"
+                          title={`Joined ${item.employee?.joining_date} — salary prorated from that date`}
+                        >
+                          New joiner
+                        </div>
+                      )}
                     </td>
                     <td className="py-2 px-3 text-slate-600 dark:text-slate-300 font-medium border-r border-b border-slate-100 dark:border-slate-800">
                       {item.calculation_days || (item.working_days || 26)}d
@@ -1572,7 +1679,7 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 text-red-500">-{formatCurrency(item.esi_deduction)}</td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 text-red-500">-{formatCurrency(item.tax_deduction)}</td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 text-emerald-600 dark:text-emerald-400">+{formatCurrency(item.bonus)}</td>
-                    <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 font-bold text-slate-800 dark:text-white">{formatCurrency(getNetSalary(item))}</td>
+                    <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 font-bold text-slate-800 dark:text-white">{formatCurrency(getNetSalary(item, month, year))}</td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800">
                       {(item as any).payslip_status === 'held' ? (
                         <div className="flex flex-col gap-1">
@@ -1773,6 +1880,12 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
             <div className="grid grid-cols-2 gap-y-4 gap-x-2 pt-2 text-xs sm:text-sm">
               <div className="col-span-2 flex gap-2">MONTHLY SAL: <span className="font-semibold text-slate-900 dark:text-white">₹{formatCurrency(salarySlipModal.monthly_salary)}</span></div>
               <div className="col-span-2 flex gap-2">TOTAL DAYS: <span className="font-semibold text-slate-900 dark:text-white">{salarySlipModal.calculation_days || salarySlipModal.working_days || 26}</span></div>
+              {isMidMonthJoinerItem(salarySlipModal, month, year) && (
+                <div className="col-span-2 flex gap-2 items-center text-indigo-600 dark:text-indigo-400">
+                  <span className="font-semibold">NEW JOINER:</span>
+                  <span>Joined {salarySlipModal.employee?.joining_date} — salary prorated from that date</span>
+                </div>
+              )}
 
               <div>
                 Timesheet missing days: <span className="font-semibold text-slate-900 dark:text-white">{salarySlipModal.missing_timesheets}</span>
@@ -1813,12 +1926,12 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
               <div>Tax: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency(salarySlipModal.tax_deduction || 0)}</span></div>
               <div>Bonus: <span className="font-semibold text-green-600 dark:text-green-400">+₹{formatCurrency(salarySlipModal.bonus || 0)}</span></div>
 
-              <div>Sunday Work: <span className="font-semibold text-green-600 dark:text-green-400">+₹{formatCurrency(Math.round((salarySlipModal.monthly_salary / getItemDaysForRate(salarySlipModal)) * safeNumber(salarySlipModal.sunday_work_days, 0)))}</span></div>
+              <div>Sunday Work: <span className="font-semibold text-green-600 dark:text-green-400">+₹{formatCurrency(Math.round((salarySlipModal.monthly_salary / ((month && year) ? new Date(year, month, 0).getDate() : 30)) * safeNumber(salarySlipModal.sunday_work_days, 0)))}</span></div>
               <div />
             </div>
 
             <div className="border-t border-slate-300 dark:border-slate-600 pt-4 mt-4 text-base sm:text-lg">
-              Total sal after deduction: <span className="font-bold text-slate-900 dark:text-white ml-2">₹{formatCurrency(getNetSalary(salarySlipModal))}</span>
+              Total sal after deduction: <span className="font-bold text-slate-900 dark:text-white ml-2">₹{formatCurrency(getNetSalary(salarySlipModal, month, year))}</span>
             </div>
           </div>
         )}
