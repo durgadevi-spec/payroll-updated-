@@ -59,6 +59,52 @@ const isMidMonthJoinerItem = (item: PayrollItemWithEmployee, month?: number, yea
   return eligibleDays < calendarDays;
 };
 
+// Returns the Sunday dates ('YYYY-MM-DD') that fall inside this employee's
+// payable window for the month (from their joining date — or the 1st if they
+// joined earlier — through month-end), skipping any that are also holidays
+// (those are already reported separately in the Holidays card).
+//
+// These days ARE paid (they're part of the "DAYS" column total), but the
+// backend's missing-timesheet loop always does `if (dt.getDay() === 0) continue;`
+// before building the missing-dates list, so a Sunday can never show up as a
+// "missing timesheet" day. This helper exists purely so the UI can say that
+// explicitly instead of the user having to notice a gap in the date list.
+const getAutoExcludedSundays = (
+  item: PayrollItemWithEmployee,
+  month?: number,
+  year?: number,
+  holidayDates: string[] = []
+): string[] => {
+  if (!month || !year) return [];
+  const calendarDays = new Date(year, month, 0).getDate();
+  const joiningDate = item.employee?.joining_date;
+
+  let startDay = 1;
+  if (joiningDate) {
+    const parts = joiningDate.split('-').map(Number);
+    if (parts.length === 3 && !parts.some(isNaN)) {
+      const [jy, jm, jd] = parts;
+      if (jy === year && jm === month) {
+        startDay = jd; // joined mid-month — window starts on joining day
+      } else if (jy > year || (jy === year && jm > month)) {
+        return []; // joins in a future month — no window this month at all
+      }
+      // else: joined before this month — window is the full month (startDay stays 1)
+    }
+  }
+
+  const holidaySet = new Set(holidayDates);
+  const sundays: string[] = [];
+  for (let d = startDay; d <= calendarDays; d++) {
+    const dt = new Date(year, month - 1, d);
+    if (dt.getDay() !== 0) continue; // 0 = Sunday
+    const dstr = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    if (holidaySet.has(dstr)) continue; // already counted as a holiday, don't double-report
+    sundays.push(dstr);
+  }
+  return sundays;
+};
+
 const getTimesheetExceptionDaysApplied = (item: PayrollItemWithEmployee) => {
   const type = (item as any).timesheet_exception_type;
   if (type === 'full') return safeNumber(item.missing_timesheets, 0);
@@ -1603,6 +1649,7 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
               const finalMissingDates: string[] = (item as any).missing_dates || [];
               const isOD = (item as any).leave_type === 'OD' || (odDates.length > 0 && item.unpaid_leaves === 0 && uncoveredCompOffDates.length === 0);
               const isExpanded = expandedItemId === item.id;
+              const autoExcludedSundays = getAutoExcludedSundays(item, month, year, holidayDates);
 
               // Solid (non-transparent) row backgrounds — required for the frozen first column.
               // A translucent bg (e.g. slate-50/60) lets the columns scrolled underneath show
@@ -1690,6 +1737,11 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                           <ShieldCheck size={14} />
                         </button>
                       </div>
+                      {showDetails && autoExcludedSundays.length > 0 && (
+                        <div className="text-[10px] text-sky-600 dark:text-sky-400 mt-0.5" title={autoExcludedSundays.map(fmt).join(', ')}>
+                          {autoExcludedSundays.length} Sunday{autoExcludedSundays.length === 1 ? '' : 's'} auto-excluded (paid, no TS required)
+                        </div>
+                      )}
                       {showDetails && excluded.length > 0 && (
                         <div className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
                           {excluded.length} excluded ✓
@@ -1847,6 +1899,14 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                             {holidayDates.length > 0
                               ? holidayDates.map(d => <div key={d} className="text-blue-700 dark:text-blue-300">{fmt(d)}</div>)
                               : <div className="text-slate-400 italic">None / Not applicable</div>
+                            }
+                          </div>
+                          <div className="bg-sky-50 dark:bg-sky-900/20 p-2 rounded border border-sky-200 dark:border-sky-800">
+                            <p className="font-semibold text-sky-600 dark:text-sky-400 mb-1">🗓️ Sundays Auto-Excluded ({autoExcludedSundays.length} dates)</p>
+                            <p className="text-[9px] text-slate-400 mb-1">Paid via DAYS, but no timesheet is required on a weekly off</p>
+                            {autoExcludedSundays.length > 0
+                              ? autoExcludedSundays.map(d => <div key={d} className="text-sky-700 dark:text-sky-300">{fmt(d)}</div>)
+                              : <div className="text-slate-400 italic">None in this period</div>
                             }
                           </div>
                           {odDates.length > 0 && (
