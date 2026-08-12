@@ -2,6 +2,8 @@ interface BadgeProps {
   variant?: 'success' | 'error' | 'warning' | 'info' | 'neutral';
   children: React.ReactNode;
   dot?: boolean;
+  size?: 'sm' | 'md';
+  className?: string;
 }
 
 const variants = {
@@ -20,10 +22,10 @@ const dotColors = {
   neutral: 'bg-slate-400',
 };
 
-export function Badge({ variant = 'neutral', children, dot = false }: BadgeProps) {
+export function Badge({ variant = 'neutral', children, dot = false, size = 'md', className = '' }: BadgeProps) {
   return (
     <span
-      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium border ${variants[variant]}`}
+      className={`inline-flex items-center gap-1.5 rounded-full text-xs font-medium border ${size === 'sm' ? 'px-1.5 py-0' : 'px-2 py-0.5'} ${variants[variant]} ${className}`}
     >
       {dot && <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColors[variant]}`} />}
       {children}

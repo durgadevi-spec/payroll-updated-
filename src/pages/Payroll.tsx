@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Calculator, Play, ChevronDown, ChevronUp, CheckCircle2, DollarSign, AlertTriangle, Trash2, Eye, Edit2, FileSpreadsheet, Info, X, RefreshCw, FileText, Maximize2, Minimize2, ShieldCheck } from 'lucide-react';
 import { PreGenerationAnalysisModal } from '../components/PreGenerationAnalysisModal';
-import { Payroll as PayrollType, PayrollItem, Employee, Leave, Timesheet } from '../types';
+import { Payroll as PayrollType, PayrollItem, Employee } from '../types/index';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { calculatePayroll, formatCurrency, getCurrentMonth, getMonthName } from '../lib/payrollCalculator';
@@ -201,7 +201,6 @@ export function Payroll() {
   const { showToast } = useToast();
   const [payrolls, setPayrolls] = useState<PayrollType[]>([]);
   const [loading, setLoading] = useState(true);
-  const [generating, setGenerating] = useState(false);
   const [selectedPayroll, setSelectedPayroll] = useState<PayrollType | null>(null);
   const [payrollItems, setPayrollItems] = useState<PayrollItemWithEmployee[]>([]);
   const [loadingItems, setLoadingItems] = useState(false);
@@ -221,14 +220,13 @@ export function Payroll() {
   const [showPastAnalysisModal, setShowPastAnalysisModal] = useState(false);
   const [pastAnalysisPayroll, setPastAnalysisPayroll] = useState<PayrollType | null>(null);
   const [pastAnalysisEmpIds, setPastAnalysisEmpIds] = useState<string[]>([]);
-  const [previewData, setPreviewData] = useState<any>(null);
+  const [previewData] = useState<any>(null);
   const { month: currentMonth, year: currentYear } = getCurrentMonth();
   const [genMonth, setGenMonth] = useState(currentMonth);
   const [genYear, setGenYear] = useState(currentYear);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [selectedEmployeeId, setSelectedEmployeeId] = useState('');
   const [editingItem, setEditingItem] = useState<(PayrollItemWithEmployee & { leave_source?: string; timesheet_status?: string; timesheet_submitted_at?: string | null }) | null>(null);
-  const [advanceInput, setAdvanceInput] = useState('0');
   const [sundayInput, setSundayInput] = useState('0');
   const [bonusInput, setBonusInput] = useState('0');
   const [calculationType, setCalculationType] = useState<'monthly' | 'custom' | 'working_days'>('monthly');
@@ -442,7 +440,6 @@ export function Payroll() {
     const dataToUse = dataOverride || previewData;
     if (!dataToUse) return;
 
-    setGenerating(true);
     try {
       // Version = how many payrolls already exist for this month/year, plus this new one.
       // First generation for a month is V1; every regeneration after that increments.
@@ -626,7 +623,6 @@ export function Payroll() {
       showToast('error', 'Failed to generate payroll');
     }
 
-    setGenerating(false);
     setShowPreGenModal(false);
     setShowConfigModal(false);
     await loadPayrolls();
@@ -859,13 +855,6 @@ export function Payroll() {
     }
   }
 
-  const getRowClass = (status: string) => {
-    if (status === 'completed') return 'success';
-    if (status === 'processing') return 'warning';
-    if (status === 'paid') return 'info';
-    return 'neutral';
-  };
-
   const monthOptions = Array.from({ length: 12 }, (_, i) => ({ value: String(i + 1), label: getMonthName(i + 1) }));
   const yearOptions = [2024, 2025, 2026, 2027].map(y => ({ value: String(y), label: String(y) }));
 
@@ -1026,7 +1015,6 @@ export function Payroll() {
                             onStatusChange={() => loadPayrollItems(payroll.id)}
                             onEdit={(item) => {
                               setEditingItem(item);
-                              setAdvanceInput(String(item.advance_deduction || 0));
                               setSundayInput(String(item.sunday_work_days || 0));
                               setBonusInput(String(item.bonus || 0));
                             }}
@@ -1134,7 +1122,6 @@ export function Payroll() {
                         <button
                           onClick={() => {
                             setEditingItem(item);
-                            setAdvanceInput(String(item.advance_deduction || 0));
                             setSundayInput(String(item.sunday_work_days || 0));
                             setBonusInput(String(item.bonus || 0));
                           }}

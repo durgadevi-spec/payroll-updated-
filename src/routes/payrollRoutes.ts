@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { Pool, Client } from 'pg';
+import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
 import ZKLib from 'node-zklib';
 import { sendEmail } from './emailRoutes';
@@ -21,7 +21,7 @@ function normalizeConnectionString(connectionString: string) {
     url.searchParams.delete('sslmode');
     return url.toString();
   } catch {
-    return connectionString.replace(/([?&])sslmode=(require|prefer|verify-ca)(&|$)/gi, (match, sep, mode, tail) => {
+    return connectionString.replace(/([?&])sslmode=(require|prefer|verify-ca)(&|$)/gi, (_match, sep, _mode, tail) => {
       if (sep === '?') {
         return tail ? '?' : '';
       }
@@ -46,15 +46,7 @@ function createPool(connectionString: string) {
   });
 }
 
-function createClient(connectionString: string) {
-  const normalizedConnectionString = normalizeConnectionString(connectionString);
-  return new Client({
-    connectionString: normalizedConnectionString,
-    ssl: { rejectUnauthorized: false },
-  });
-}
-
-const payrollPool = createPool(payrollUrl);
+export const payrollPool = createPool(payrollUrl);
 const lmsPool = lmsUrl ? createPool(lmsUrl) : null;
 const timesheetPool = timesheetUrl ? createPool(timesheetUrl) : null;
 
@@ -89,18 +81,6 @@ async function fetchIclockToken() {
 async function getIclockToken() {
   if (process.env.ILOCK_API_TOKEN) return process.env.ILOCK_API_TOKEN;
   return fetchIclockToken();
-}
-
-function createPayrollClient() {
-  return createClient(payrollUrl);
-}
-
-function createLmsClient() {
-  return lmsUrl ? createClient(lmsUrl) : null;
-}
-
-function createTimesheetClient() {
-  return timesheetUrl ? createClient(timesheetUrl) : null;
 }
 
 const router = Router();
@@ -265,7 +245,6 @@ router.get('/payroll-processing', async (req, res) => {
     const lastDayOfMonth = new Date(Number(year), Number(month), 0);
     const endDate = isCurrentMonth ? now : lastDayOfMonth;
 
-    const daysInMonth = endDate.getDate();
     const startDateStr = startDate.toISOString().split('T')[0];
     const endDateStr = endDate.toISOString().split('T')[0];
 
@@ -914,7 +893,6 @@ router.post('/employees/sync-biometric', async (req, res) => {
 
     client = await payrollPool.connect();
     let newCount = 0;
-    let updatedCount = 0;
 
     for (const record of records) {
       const emp_code = record.emp_code;
@@ -929,7 +907,7 @@ router.post('/employees/sync-biometric', async (req, res) => {
 
       // Upsert employee using emp_code as unique identifier or just email
       // Assuming email is unique in the employees table
-      const upsert = await client.query(
+      await client.query(
         `INSERT INTO employees (name, email, department, status, designation)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (email) DO UPDATE SET
@@ -1042,12 +1020,6 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
     const employees = empRes.rows;
 
     // Helper to format date - Use UTC to avoid timezone shift
-    const formatDate = (d: any) => {
-      const dt = new Date(d);
-      // Use UTC date parts to prevent timezone shifting
-      return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
-    };
-
     // Helper to format local date (for date strings from DB that are already date-only)
     const formatLocalDate = (d: any) => {
       if (typeof d === 'string' && d.length === 10) return d; // Already YYYY-MM-DD
@@ -1055,7 +1027,6 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
       return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
     };
 
-    const startDate = new Date(year, month - 1, 1);
     const endDate = new Date(year, month, 0);
 
     // Fetch holidays - use UTC to avoid timezone shift
@@ -1294,7 +1265,6 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
         }
 
         const isSunday = curr.getDay() === 0;
-        const isSaturday = curr.getDay() === 6;
         const isHoliday = holidaySet.has(dStr);
         const leave = empLeaves.get(dStr);
         const perm = empPerms.get(dStr);
@@ -1515,7 +1485,6 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
       }
 
       // Compute Summaries
-      let dedCount = 0;
       for (const day of empData.days) {
         if (day.attendance_status === 'Not Joined') {
           // Before the employee's joining date — excluded entirely, not payable and not deductible.
@@ -1566,7 +1535,7 @@ router.post('/payroll-items/external-data', async (req, res) => {
   const { employeeIds, month, year } = req.body;
 
   const leaveMap: Record<string, { employee_id: string; unpaid_leaves: number; total_leaves: number; paid_leaves: number; leave_type: string; leave_dates: string[]; pa_sla_consumed?: number; od_dates?: string[]; permission_hours?: number; dates?: string[] }> = {};
-  const timesheetMap: Record<string, { employee_id: string; missing_days: number; submitted_at: string | null; missing_dates: string[]; excluded_dates?: string[] }> = {};
+  const timesheetMap: Record<string, { employee_id: string; missing_days: number; submitted_at: string | null; missing_dates: string[]; excluded_dates?: string[]; holiday_dates?: string[] }> = {};
 
   let pClient, lmsClient, timesheetClient;
 
@@ -1574,8 +1543,6 @@ router.post('/payroll-items/external-data', async (req, res) => {
     pClient = await payrollPool.connect();
     const namesRes = await pClient.query('SELECT id, name, email, employee_code, department, use_pa_sla, pa_sla_balance FROM employees WHERE id = ANY($1)', [employeeIds]);
     const empData = namesRes.rows;
-    const settingsResult = await pClient.query('SELECT value FROM settings WHERE key = \'working_days\'');
-    const workingDays = parseInt(settingsResult.rows[0]?.value || '26');
     // Fetch ALL holidays for the month (with optional department filter)
     const holidayRes = await pClient.query(
       `SELECT date, applicable_departments FROM holidays WHERE EXTRACT(MONTH FROM date) = $1 AND EXTRACT(YEAR FROM date) = $2`,
@@ -2141,15 +2108,11 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       return res.status(404).json({ error: 'Payroll not found' });
     }
 
-    const settingsResult = await payrollClient.query('SELECT value FROM settings WHERE key = \'working_days\'');
-    const workingDays = parseInt(settingsResult.rows[0]?.value || '26');
-
     // Fetch holidays for the month to accurately compute missing days
     const holidayRes = await payrollClient.query(
       `SELECT date FROM holidays WHERE EXTRACT(MONTH FROM date) = $1 AND EXTRACT(YEAR FROM date) = $2`,
       [payroll.month, payroll.year]
     );
-    const holidayCount = holidayRes.rows.length;
     // Helper: convert DB date/timestamp to local YYYY-MM-DD string without UTC timezone shift
     const toLocalDateStr = (d: Date | string): string => {
       const dt = new Date(d);
@@ -2201,7 +2164,6 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
 
       // Use stored excluded/holiday dates if already saved (for current payrolls)
       const storedExcludedDates: string[] = (item.timesheet_excluded_dates as any) || [];
-      const storedHolidayDates: string[] = (item.holiday_dates as any) || [];
 
       if (lmsClient) {
         try {
@@ -3076,7 +3038,7 @@ router.patch('/payroll-items/:id/missing-punch-exception', async (req, res) => {
   }
 });
 
-router.get('/settings', async (req, res) => {
+router.get('/settings', async (_req, res) => {
   let client;
   try {
     client = await payrollPool.connect();
@@ -3109,7 +3071,7 @@ router.post('/settings', async (req, res) => {
   }
 });
 
-router.post('/attendance/sync-direct', async (req, res) => {
+router.post('/attendance/sync-direct', async (_req, res) => {
   let client;
   let deviceIp = process.env.BIOMETRIC_DEVICE_IP || '192.168.1.201';
   let devicePort = parseInt(process.env.BIOMETRIC_DEVICE_PORT || '4370');
@@ -3308,12 +3270,20 @@ router.get('/daily-analysis', async (req, res) => {
   }
 });
 
-router.get('/advances', async (req, res) => {
+router.get('/advances', async (_req, res) => {
   let client;
   try {
     client = await payrollPool.connect();
     const result = await client.query(`
-      SELECT a.*, e.name as employee_name, e.department
+      SELECT a.id, a.employee_id, a.amount, a.date, a.reason, a.repayment_type, a.installment_amount,
+             a.balance, a.remarks, a.status, a.request_source, a.advance_type, a.no_of_installments,
+             a.approved_by, a.approved_at, a.disbursed_at, a.rejected_by, a.rejected_at, a.rejection_reason,
+             a.expense_category, a.settlement_type, a.reconciled_amount, a.shortfall_action,
+             a.shortfall_reference, a.shortfall_notes, a.carried_forward_to, a.closed_at, a.closed_by,
+             a.payment_mode, a.payment_reference, a.attachment_filename,
+             (a.attachment_data IS NOT NULL) AS has_attachment,
+             a.created_at, a.updated_at,
+             e.name as employee_name, e.department
       FROM advances a
       JOIN employees e ON a.employee_id = e.id
       ORDER BY a.created_at DESC
@@ -3327,15 +3297,244 @@ router.get('/advances', async (req, res) => {
   }
 });
 
-router.post('/advances', async (req, res) => {
-  const { employee_id, amount, date, reason, repayment_type, installment_amount, remarks } = req.body;
+// Fetch just the proof-of-payment attachment for one advance (kept out of the list payload above)
+router.get('/advances/:id/attachment', async (req, res) => {
+  const { id } = req.params;
+  let client;
+  try {
+    client = await payrollPool.connect();
+    const result = await client.query('SELECT attachment_filename, attachment_data FROM advances WHERE id = $1', [id]);
+    if (result.rows.length === 0 || !result.rows[0].attachment_data) {
+      return res.status(404).json({ error: 'No attachment found' });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error fetching advance attachment:', err);
+    res.status(500).json({ error: 'Failed to fetch attachment' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Reconciliation-type advances (Project / Admin expense advances): instead of
+// payroll-deducted installments, the employee logs receipted expense line
+// items against the advance (Zoho Expense Report style), and the admin
+// reconciles + closes it once spend is in.
+// ---------------------------------------------------------------------------
+
+router.get('/advances/:id/expense-items', async (req, res) => {
+  const { id } = req.params;
   let client;
   try {
     client = await payrollPool.connect();
     const result = await client.query(`
-      INSERT INTO advances (employee_id, amount, date, reason, repayment_type, installment_amount, balance, remarks, status)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Active')
-      RETURNING *
+      SELECT id, advance_id, date, category, description, amount, receipt_filename,
+             (receipt_data IS NOT NULL) AS has_receipt, created_by, created_at
+      FROM advance_expense_items WHERE advance_id = $1 ORDER BY date DESC, created_at DESC
+    `, [id]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error fetching expense items:', err);
+    res.status(500).json({ error: 'Failed to fetch expense items' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+router.get('/advances/:id/expense-items/:itemId/receipt', async (req, res) => {
+  const { itemId } = req.params;
+  let client;
+  try {
+    client = await payrollPool.connect();
+    const result = await client.query('SELECT receipt_filename, receipt_data FROM advance_expense_items WHERE id = $1', [itemId]);
+    if (result.rows.length === 0 || !result.rows[0].receipt_data) {
+      return res.status(404).json({ error: 'No receipt found' });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error fetching receipt:', err);
+    res.status(500).json({ error: 'Failed to fetch receipt' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+router.post('/advances/:id/expense-items', async (req, res) => {
+  const { id } = req.params;
+  const { date, category, description, amount, receipt_filename, receipt_data, created_by } = req.body;
+  if (!date || !category || !amount) {
+    return res.status(400).json({ error: 'Date, category and amount are required' });
+  }
+  let client;
+  try {
+    client = await payrollPool.connect();
+    const advRes = await client.query('SELECT id, settlement_type, status FROM advances WHERE id = $1', [id]);
+    if (advRes.rows.length === 0) return res.status(404).json({ error: 'Advance not found' });
+    if (advRes.rows[0].settlement_type !== 'Reconciliation') {
+      return res.status(400).json({ error: 'Expense items can only be logged against a Reconciliation-type advance' });
+    }
+    if (advRes.rows[0].status === 'Closed') {
+      return res.status(400).json({ error: 'This advance is already closed' });
+    }
+
+    const parsedAmount = parseFloat(amount.toString()) || 0;
+    const itemRes = await client.query(`
+      INSERT INTO advance_expense_items (advance_id, date, category, description, amount, receipt_filename, receipt_data, created_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING id, advance_id, date, category, description, amount, receipt_filename,
+                (receipt_data IS NOT NULL) AS has_receipt, created_by, created_at
+    `, [id, date, category, description || null, parsedAmount, receipt_filename || null, receipt_data || null, created_by || null]);
+
+    await client.query(
+      `UPDATE advances SET reconciled_amount = COALESCE(reconciled_amount, 0) + $1 WHERE id = $2`,
+      [parsedAmount, id]
+    );
+
+    res.status(201).json(itemRes.rows[0]);
+  } catch (err) {
+    console.error('Error adding expense item:', err);
+    res.status(500).json({ error: 'Failed to add expense item' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+router.delete('/advances/:id/expense-items/:itemId', async (req, res) => {
+  const { id, itemId } = req.params;
+  let client;
+  try {
+    client = await payrollPool.connect();
+    const itemRes = await client.query('SELECT amount FROM advance_expense_items WHERE id = $1 AND advance_id = $2', [itemId, id]);
+    if (itemRes.rows.length === 0) return res.status(404).json({ error: 'Expense item not found' });
+
+    await client.query('DELETE FROM advance_expense_items WHERE id = $1', [itemId]);
+    await client.query(
+      `UPDATE advances SET reconciled_amount = GREATEST(0, COALESCE(reconciled_amount, 0) - $1) WHERE id = $2`,
+      [Number(itemRes.rows[0].amount), id]
+    );
+    res.status(204).send();
+  } catch (err) {
+    console.error('Error deleting expense item:', err);
+    res.status(500).json({ error: 'Failed to delete expense item' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// Reconcile & close a Reconciliation-type advance against what's been logged so far.
+// Mirrors Zoho Expense's report settlement: if the employee under-spent the advance,
+// the gap is either Refunded (money returned) or Carried Forward (rolled into a new
+// advance for next time); if they over-spent, the excess is flagged Reimbursed.
+router.post('/advances/:id/reconcile', async (req, res) => {
+  const { id } = req.params;
+  const { action, reference, notes, closed_by } = req.body;
+  let client;
+  try {
+    client = await payrollPool.connect();
+    const currentRes = await client.query('SELECT * FROM advances WHERE id = $1', [id]);
+    if (currentRes.rows.length === 0) return res.status(404).json({ error: 'Advance not found' });
+    const current = currentRes.rows[0];
+
+    if (current.settlement_type !== 'Reconciliation') {
+      return res.status(400).json({ error: 'Only Reconciliation-type advances are closed this way — payroll advances close automatically once the balance is recovered' });
+    }
+    if (current.status !== 'Active') {
+      return res.status(400).json({ error: 'Only an Active advance can be reconciled' });
+    }
+
+    const advanceAmount = Number(current.amount);
+    const reconciled = Number(current.reconciled_amount) || 0;
+    const gap = Math.round((advanceAmount - reconciled) * 100) / 100; // >0 = employee owes company, <0 = company owes employee
+
+    const allowedActions = ['Refunded', 'Carried Forward', 'Reimbursed', 'Settled'];
+    if (!action || !allowedActions.includes(action)) {
+      return res.status(400).json({ error: `action must be one of: ${allowedActions.join(', ')}` });
+    }
+    if (gap > 0.01 && action === 'Reimbursed') {
+      return res.status(400).json({ error: 'Reimbursed only applies when spend exceeds the advance amount' });
+    }
+    if (gap < -0.01 && (action === 'Refunded' || action === 'Carried Forward')) {
+      return res.status(400).json({ error: 'Refunded / Carried Forward only apply when the employee under-spent the advance' });
+    }
+
+    let carriedForwardId: string | null = null;
+
+    if (action === 'Carried Forward' && gap > 0.01) {
+      const newAdvRes = await client.query(`
+        INSERT INTO advances (
+          employee_id, amount, date, reason, repayment_type, installment_amount, balance, remarks, status,
+          expense_category, settlement_type
+        )
+        VALUES ($1, $2, CURRENT_DATE, $3, 'One-time', $2, $2, $4, 'Active', $5, 'Reconciliation')
+        RETURNING id
+      `, [
+        current.employee_id,
+        gap,
+        `Carried forward from advance dated ${new Date(current.date).toISOString().slice(0, 10)}`,
+        notes || null,
+        current.expense_category
+      ]);
+      carriedForwardId = newAdvRes.rows[0].id;
+    }
+
+    const result = await client.query(`
+      UPDATE advances
+      SET status = 'Closed',
+          balance = 0,
+          shortfall_action = $1,
+          shortfall_reference = $2,
+          shortfall_notes = $3,
+          carried_forward_to = $4,
+          closed_at = NOW(),
+          closed_by = $5
+      WHERE id = $6
+      RETURNING id, employee_id, amount, reconciled_amount, status, shortfall_action, shortfall_reference,
+                shortfall_notes, carried_forward_to, closed_at, closed_by
+    `, [action, reference || null, notes || null, carriedForwardId, closed_by || 'admin@company.com', id]);
+
+    await client.query(
+      `INSERT INTO audit_logs (action, entity, entity_id, details, user_email) VALUES ($1,$2,$3,$4,$5)`,
+      ['ADVANCE_RECONCILED', 'advances', id, JSON.stringify({ employee_id: current.employee_id, advanceAmount, reconciled, gap, action, carriedForwardId }), closed_by || 'admin@company.com']
+    );
+
+    res.json({ ...result.rows[0], gap, carried_forward_id: carriedForwardId });
+  } catch (err) {
+    console.error('Error reconciling advance:', err);
+    res.status(500).json({ error: 'Failed to reconcile advance' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+router.post('/advances', async (req, res) => {
+  const {
+    employee_id, amount, date, reason, repayment_type, installment_amount, remarks,
+    expense_category, settlement_type, payment_mode, payment_reference, attachment_filename, attachment_data
+  } = req.body;
+
+  // Direct admin entries represent an advance that has already been paid out,
+  // so we require proof of disbursement (payment mode + attachment) up front.
+  if (!payment_mode) {
+    return res.status(400).json({ error: 'Payment mode (UPI / Cheque / Bank Transfer / Cash) is required' });
+  }
+  if (!attachment_data) {
+    return res.status(400).json({ error: 'Proof of payment attachment is required' });
+  }
+
+  let client;
+  try {
+    client = await payrollPool.connect();
+    const result = await client.query(`
+      INSERT INTO advances (
+        employee_id, amount, date, reason, repayment_type, installment_amount, balance, remarks, status,
+        expense_category, settlement_type, payment_mode, payment_reference, attachment_filename, attachment_data,
+        disbursed_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Active', $9, $10, $11, $12, $13, $14, NOW())
+      RETURNING id, employee_id, amount, date, reason, repayment_type, installment_amount, balance, remarks,
+                status, expense_category, settlement_type, payment_mode, payment_reference, attachment_filename,
+                (attachment_data IS NOT NULL) AS has_attachment, disbursed_at, created_at, updated_at
     `, [
       employee_id,
       parseFloat(amount.toString()) || 0,
@@ -3344,7 +3543,13 @@ router.post('/advances', async (req, res) => {
       repayment_type,
       parseFloat((installment_amount || '0').toString()) || 0,
       parseFloat(amount.toString()) || 0,
-      remarks
+      remarks,
+      expense_category || 'Salary',
+      settlement_type || (expense_category === 'Salary' || !expense_category ? 'Payroll' : 'Reconciliation'),
+      payment_mode,
+      payment_reference || null,
+      attachment_filename || null,
+      attachment_data
     ]);
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -3357,23 +3562,36 @@ router.post('/advances', async (req, res) => {
 
 router.put('/advances/:id', async (req, res) => {
   const { id } = req.params;
-  const { amount, date, reason, repayment_type, installment_amount, remarks } = req.body;
+  const {
+    amount, date, reason, repayment_type, installment_amount, remarks,
+    expense_category, settlement_type, payment_mode, payment_reference, attachment_filename, attachment_data
+  } = req.body;
   let client;
   try {
     client = await payrollPool.connect();
     // Re-calculate balance if amount changes (simple calculation assuming no deductions have been made yet, or preserving recovered amount difference)
-    const currentRes = await client.query('SELECT amount, balance FROM advances WHERE id = $1', [id]);
+    const currentRes = await client.query('SELECT amount, balance, attachment_data, attachment_filename FROM advances WHERE id = $1', [id]);
     if (currentRes.rows.length === 0) return res.status(404).json({ error: 'Advance not found' });
     const current = currentRes.rows[0];
     const recovered = Number(current.amount) - Number(current.balance);
     const newAmount = parseFloat(amount.toString()) || 0;
     const newBalance = Math.max(0, newAmount - recovered);
 
+    // Only overwrite the stored attachment if a new one was actually uploaded,
+    // so editing other fields doesn't wipe out the existing proof of payment.
+    const newAttachmentData = attachment_data !== undefined ? attachment_data : current.attachment_data;
+    const newAttachmentFilename = attachment_data !== undefined ? (attachment_filename || null) : current.attachment_filename;
+
     const result = await client.query(`
       UPDATE advances
-      SET amount = $1, date = $2, reason = $3, repayment_type = $4, installment_amount = $5, balance = $6, remarks = $7
-      WHERE id = $8
-      RETURNING *
+      SET amount = $1, date = $2, reason = $3, repayment_type = $4, installment_amount = $5, balance = $6, remarks = $7,
+          expense_category = COALESCE($8, expense_category), settlement_type = COALESCE($9, settlement_type),
+          payment_mode = COALESCE($10, payment_mode),
+          payment_reference = COALESCE($11, payment_reference), attachment_filename = $12, attachment_data = $13
+      WHERE id = $14
+      RETURNING id, employee_id, amount, date, reason, repayment_type, installment_amount, balance, remarks,
+                status, expense_category, settlement_type, payment_mode, payment_reference, attachment_filename,
+                (attachment_data IS NOT NULL) AS has_attachment, disbursed_at, created_at, updated_at
     `, [
       newAmount,
       date,
@@ -3382,6 +3600,12 @@ router.put('/advances/:id', async (req, res) => {
       parseFloat((installment_amount || '0').toString()) || 0,
       newBalance,
       remarks,
+      expense_category || null,
+      settlement_type || null,
+      payment_mode || null,
+      payment_reference !== undefined ? payment_reference : null,
+      newAttachmentFilename,
+      newAttachmentData,
       id
     ]);
     res.json(result.rows[0]);
@@ -3403,6 +3627,172 @@ router.delete('/advances/:id', async (req, res) => {
   } catch (err) {
     console.error('Error deleting advance:', err);
     res.status(500).json({ error: 'Failed to delete advance' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Advance request workflow (Zoho-style "employee raises -> admin approves")
+// This sits alongside the existing direct-create/edit/delete routes above and
+// does not alter their behaviour. Requests start life as 'Pending Approval'
+// and only become a real 'Active' advance (i.e. picked up by payroll) once
+// approved.
+// ---------------------------------------------------------------------------
+
+// Employee raises a new advance request
+router.post('/advances/request', async (req, res) => {
+  const { employee_id, amount, date, reason, advance_type, repayment_type, no_of_installments, remarks } = req.body;
+  if (!employee_id || !amount) {
+    return res.status(400).json({ error: 'Employee and amount are required' });
+  }
+  let client;
+  try {
+    client = await payrollPool.connect();
+    const parsedAmount = parseFloat(amount.toString()) || 0;
+    const installments = repayment_type === 'One-time' ? 1 : (parseInt((no_of_installments || '1').toString(), 10) || 1);
+    const installmentAmount = repayment_type === 'One-time' ? parsedAmount : Math.ceil((parsedAmount / installments) * 100) / 100;
+
+    const result = await client.query(`
+      INSERT INTO advances (
+        employee_id, amount, date, reason, repayment_type, installment_amount, balance, remarks,
+        status, request_source, advance_type, no_of_installments
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Pending Approval', 'Employee Request', $9, $10)
+      RETURNING *
+    `, [
+      employee_id,
+      parsedAmount,
+      date || new Date().toISOString().slice(0, 10),
+      reason,
+      repayment_type || 'Monthly',
+      installmentAmount,
+      parsedAmount,
+      remarks,
+      advance_type || 'Salary Advance',
+      installments
+    ]);
+
+    const advance = result.rows[0];
+    await client.query(
+      `INSERT INTO audit_logs (action, entity, entity_id, details, user_email) VALUES ($1,$2,$3,$4,$5)`,
+      ['ADVANCE_REQUEST_RAISED', 'advances', advance.id, JSON.stringify({ employee_id, amount: parsedAmount, advance_type }), 'employee-self-service']
+    );
+
+    res.status(201).json(advance);
+  } catch (err) {
+    console.error('Error raising advance request:', err);
+    res.status(500).json({ error: 'Failed to raise advance request' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// Admin/approver approves a pending request -> becomes an Active advance
+router.post('/advances/:id/approve', async (req, res) => {
+  const { id } = req.params;
+  const {
+    approved_by, installment_amount,
+    expense_category, settlement_type, payment_mode, payment_reference, attachment_filename, attachment_data
+  } = req.body;
+
+  // Approving a request is the actual disbursement moment for employee-raised
+  // advances, so proof of payment is required here too.
+  if (!payment_mode) {
+    return res.status(400).json({ error: 'Payment mode (UPI / Cheque / Bank Transfer / Cash) is required to approve & disburse' });
+  }
+  if (!attachment_data) {
+    return res.status(400).json({ error: 'Proof of payment attachment is required to approve & disburse' });
+  }
+
+  let client;
+  try {
+    client = await payrollPool.connect();
+    const currentRes = await client.query('SELECT * FROM advances WHERE id = $1', [id]);
+    if (currentRes.rows.length === 0) return res.status(404).json({ error: 'Advance request not found' });
+    const current = currentRes.rows[0];
+
+    const finalInstallmentAmount = installment_amount
+      ? (parseFloat(installment_amount.toString()) || Number(current.installment_amount))
+      : Number(current.installment_amount);
+
+    const finalExpenseCategory = expense_category || current.expense_category || 'Salary';
+    const finalSettlementType = settlement_type || (finalExpenseCategory === 'Salary' ? 'Payroll' : 'Reconciliation');
+
+    const result = await client.query(`
+      UPDATE advances
+      SET status = 'Active',
+          approved_by = $1,
+          approved_at = NOW(),
+          disbursed_at = NOW(),
+          installment_amount = $2,
+          expense_category = $3,
+          settlement_type = $4,
+          payment_mode = $5,
+          payment_reference = $6,
+          attachment_filename = $7,
+          attachment_data = $8
+      WHERE id = $9
+      RETURNING id, employee_id, amount, date, reason, repayment_type, installment_amount, balance, remarks,
+                status, expense_category, settlement_type, payment_mode, payment_reference, attachment_filename,
+                (attachment_data IS NOT NULL) AS has_attachment, approved_by, approved_at, disbursed_at
+    `, [
+      approved_by || 'admin@company.com',
+      finalInstallmentAmount,
+      finalExpenseCategory,
+      finalSettlementType,
+      payment_mode,
+      payment_reference || null,
+      attachment_filename || null,
+      attachment_data,
+      id
+    ]);
+
+    await client.query(
+      `INSERT INTO audit_logs (action, entity, entity_id, details, user_email) VALUES ($1,$2,$3,$4,$5)`,
+      ['ADVANCE_REQUEST_APPROVED', 'advances', id, JSON.stringify({ employee_id: current.employee_id, amount: current.amount, payment_mode, expense_category: finalExpenseCategory, settlement_type: finalSettlementType }), approved_by || 'admin@company.com']
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error approving advance request:', err);
+    res.status(500).json({ error: 'Failed to approve advance request' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// Admin/approver rejects a pending request
+router.post('/advances/:id/reject', async (req, res) => {
+  const { id } = req.params;
+  const { rejected_by, rejection_reason } = req.body;
+  let client;
+  try {
+    client = await payrollPool.connect();
+    const currentRes = await client.query('SELECT * FROM advances WHERE id = $1', [id]);
+    if (currentRes.rows.length === 0) return res.status(404).json({ error: 'Advance request not found' });
+    const current = currentRes.rows[0];
+
+    const result = await client.query(`
+      UPDATE advances
+      SET status = 'Rejected',
+          rejected_by = $1,
+          rejected_at = NOW(),
+          rejection_reason = $2,
+          balance = 0
+      WHERE id = $3
+      RETURNING *
+    `, [rejected_by || 'admin@company.com', rejection_reason || null, id]);
+
+    await client.query(
+      `INSERT INTO audit_logs (action, entity, entity_id, details, user_email) VALUES ($1,$2,$3,$4,$5)`,
+      ['ADVANCE_REQUEST_REJECTED', 'advances', id, JSON.stringify({ employee_id: current.employee_id, amount: current.amount, rejection_reason }), rejected_by || 'admin@company.com']
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error rejecting advance request:', err);
+    res.status(500).json({ error: 'Failed to reject advance request' });
   } finally {
     if (client) client.release();
   }

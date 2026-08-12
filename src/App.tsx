@@ -2,6 +2,7 @@ import { ThemeProvider } from './context/ThemeContext';
 import { ToastProvider } from './context/ToastContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Layout } from './components/layout/Layout';
+import { EmployeeLayout } from './components/layout/EmployeeLayout';
 import { Login } from './pages/Login';
 import { Signup } from './pages/Signup';
 import { Dashboard } from './pages/Dashboard';
@@ -15,18 +16,25 @@ import { Reports } from './pages/Reports';
 import { Settings } from './pages/Settings';
 import { EmailLogs } from './pages/EmailLogs';
 import { AuditLogs } from './pages/AuditLogs';
+import { MyAdvances } from './pages/employee/MyAdvances';
+import { MyPayslips } from './pages/employee/MyPayslips';
+import { MyAttendance } from './pages/employee/MyAttendance';
 import { Page } from './types';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useEffect } from 'react';
 
-function ProtectedRoute({ children, pageId }: { children: React.ReactNode, pageId: Page }) {
-  const { isAuthenticated, loading } = useAuth();
+function AdminProtectedRoute({ children, pageId }: { children: React.ReactNode, pageId: Page }) {
+  const { isAuthenticated, role, loading } = useAuth();
   const location = useLocation();
 
   if (loading) return null;
 
   if (!isAuthenticated) {
     return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+  
+  if (role !== 'admin') {
+    return <Navigate to="/my/advances" replace />;
   }
 
   return (
@@ -36,16 +44,43 @@ function ProtectedRoute({ children, pageId }: { children: React.ReactNode, pageI
   );
 }
 
+function EmployeeProtectedRoute({ children, pageId, pageTitle }: { children: React.ReactNode, pageId: string, pageTitle: string }) {
+  const { isAuthenticated, role, loading } = useAuth();
+  const location = useLocation();
+
+  if (loading) return null;
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+
+  // Allow admins to also view employee routes if they want, but default to blocking.
+  // Actually, per requirements, admin layout is different. Let's just strictly enforce employee role for employee pages for now.
+  if (role !== 'employee') {
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  return (
+    <EmployeeLayout currentPage={pageId} pageTitle={pageTitle}>
+      {children}
+    </EmployeeLayout>
+  );
+}
+
 function AppContent() {
-  const { isAuthenticated, loading } = useAuth();
+  const { isAuthenticated, role, loading } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
   useEffect(() => {
-    if (!loading && isAuthenticated && (location.pathname === '/login' || location.pathname === '/signup')) {
-      navigate('/dashboard');
+    if (!loading && isAuthenticated && (location.pathname === '/login' || location.pathname === '/signup' || location.pathname === '/')) {
+      if (role === 'employee') {
+        navigate('/my/advances');
+      } else {
+        navigate('/dashboard');
+      }
     }
-  }, [isAuthenticated, loading, location.pathname, navigate]);
+  }, [isAuthenticated, role, loading, location.pathname, navigate]);
 
   if (loading) return (
     <div className="min-h-screen bg-slate-900 flex items-center justify-center">
@@ -58,21 +93,27 @@ function AppContent() {
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
       
-      <Route path="/" element={<Navigate to="/dashboard" replace />} />
+      <Route path="/" element={<Navigate to={role === 'employee' ? "/my/advances" : "/dashboard"} replace />} />
       
-      <Route path="/dashboard" element={<ProtectedRoute pageId="dashboard"><Dashboard /></ProtectedRoute>} />
-      <Route path="/daily-analysis" element={<ProtectedRoute pageId="daily-analysis"><DailyAnalysis /></ProtectedRoute>} />
-      <Route path="/employees" element={<ProtectedRoute pageId="employees"><Employees /></ProtectedRoute>} />
-      <Route path="/attendance" element={<ProtectedRoute pageId="attendance"><Attendance /></ProtectedRoute>} />
-      <Route path="/payroll" element={<ProtectedRoute pageId="payroll"><Payroll /></ProtectedRoute>} />
-      <Route path="/advance-management" element={<ProtectedRoute pageId="advance-management"><AdvanceManagement /></ProtectedRoute>} />
-      <Route path="/payslips" element={<ProtectedRoute pageId="payslips"><Payslips /></ProtectedRoute>} />
-      <Route path="/reports" element={<ProtectedRoute pageId="reports"><Reports /></ProtectedRoute>} />
-      <Route path="/settings" element={<ProtectedRoute pageId="settings"><Settings /></ProtectedRoute>} />
-      <Route path="/email-logs" element={<ProtectedRoute pageId="email-logs"><EmailLogs /></ProtectedRoute>} />
-      <Route path="/audit-logs" element={<ProtectedRoute pageId="audit-logs"><AuditLogs /></ProtectedRoute>} />
+      {/* Admin Routes */}
+      <Route path="/dashboard" element={<AdminProtectedRoute pageId="dashboard"><Dashboard /></AdminProtectedRoute>} />
+      <Route path="/daily-analysis" element={<AdminProtectedRoute pageId="daily-analysis"><DailyAnalysis /></AdminProtectedRoute>} />
+      <Route path="/employees" element={<AdminProtectedRoute pageId="employees"><Employees /></AdminProtectedRoute>} />
+      <Route path="/attendance" element={<AdminProtectedRoute pageId="attendance"><Attendance /></AdminProtectedRoute>} />
+      <Route path="/payroll" element={<AdminProtectedRoute pageId="payroll"><Payroll /></AdminProtectedRoute>} />
+      <Route path="/advance-management" element={<AdminProtectedRoute pageId="advance-management"><AdvanceManagement /></AdminProtectedRoute>} />
+      <Route path="/payslips" element={<AdminProtectedRoute pageId="payslips"><Payslips /></AdminProtectedRoute>} />
+      <Route path="/reports" element={<AdminProtectedRoute pageId="reports"><Reports /></AdminProtectedRoute>} />
+      <Route path="/settings" element={<AdminProtectedRoute pageId="settings"><Settings /></AdminProtectedRoute>} />
+      <Route path="/email-logs" element={<AdminProtectedRoute pageId="email-logs"><EmailLogs /></AdminProtectedRoute>} />
+      <Route path="/audit-logs" element={<AdminProtectedRoute pageId="audit-logs"><AuditLogs /></AdminProtectedRoute>} />
       
-      <Route path="*" element={<Navigate to="/dashboard" replace />} />
+      {/* Employee Routes */}
+      <Route path="/my/advances" element={<EmployeeProtectedRoute pageId="advances" pageTitle="My Advances"><MyAdvances /></EmployeeProtectedRoute>} />
+      <Route path="/my/payslips" element={<EmployeeProtectedRoute pageId="payslips" pageTitle="My Payslips"><MyPayslips /></EmployeeProtectedRoute>} />
+      <Route path="/my/attendance" element={<EmployeeProtectedRoute pageId="attendance" pageTitle="My Attendance"><MyAttendance /></EmployeeProtectedRoute>} />
+      
+      <Route path="*" element={<Navigate to={role === 'employee' ? "/my/advances" : "/dashboard"} replace />} />
     </Routes>
   );
 }

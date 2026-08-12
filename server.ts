@@ -5,6 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { payrollRouter } from './src/routes/payrollRoutes.ts';
 import { emailRouter } from './src/routes/emailRoutes.ts';
+import { selfServiceRouter } from './src/routes/selfServiceRoutes.ts';
 import { startNightlyAlertScheduler, runNightlyAlerts } from './src/jobs/nightlyAlerts.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -14,7 +15,9 @@ const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 5002;
 
 app.use(cors());
-app.use(express.json());
+// Raised from the 100kb default so advance-attachment uploads (UPI screenshot /
+// cheque scan, sent as base64) fit through the JSON body.
+app.use(express.json({ limit: '10mb' }));
 
 // Request logger for debugging
 app.use((req, res, next) => {
@@ -26,6 +29,7 @@ app.use((req, res, next) => {
 
 app.use('/api', payrollRouter);
 app.use('/api', emailRouter);
+app.use('/api', selfServiceRouter);
 
 // Manual trigger for testing — POST /api/alerts/trigger
 app.post('/api/alerts/trigger', async (req, res) => {
@@ -45,11 +49,11 @@ app.use(express.static(distPath));
 // Catch-all route to serve React's index.html or return 404 for missing API routes
 app.get('*', (req, res) => {
   if (req.url.startsWith('/api/')) {
-    res.status(404).json({ 
-      error: 'Route not found', 
+    res.status(404).json({
+      error: 'Route not found',
       path: req.url,
       method: req.method,
-      message: 'Valid routes start with /api' 
+      message: 'Valid routes start with /api'
     });
   } else {
     res.sendFile(path.join(distPath, 'index.html'));

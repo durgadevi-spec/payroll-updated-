@@ -53,11 +53,13 @@ export interface PayrollItem {
   esi_deduction: number;
   tax_deduction: number;
   loan_deduction: number;
+  advance_deduction?: number;
   bonus: number;
   net_salary: number;
   unpaid_leaves: number;
   total_leaves?: number;
   paid_leaves?: number;
+  sunday_work_days?: number;
   missing_timesheets: number;
   holiday_count: number;
   working_days: number;
