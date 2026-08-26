@@ -43,7 +43,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
       if (res.ok) {
         const data = await res.json();
-        setRole(data.role || 'employee');
+        const normalizedRole = String(data.role || 'employee').trim().toLowerCase();
+        setRole(normalizedRole === 'admin' ? 'admin' : 'employee');
         setEmployeeRecord(data.employee);
       } else {
         // No employee record found — user is an admin
@@ -100,7 +101,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = async () => {
-    await supabase.auth.signOut();
+    try {
+      await supabase.auth.signOut({ scope: 'local' });
+    } catch (error) {
+      console.error('Logout error:', error);
+    } finally {
+      setUser(null);
+      setRole(null);
+      setEmployeeRecord(null);
+      setLoading(false);
+      window.location.assign('/login');
+    }
   };
 
   return (

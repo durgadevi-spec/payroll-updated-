@@ -35,14 +35,37 @@ function getMonthName(month: number) {
   return names[month - 1] || 'Unknown';
 }
 
+// Runs `mapper` over `items` with at most `limit` in flight at once, preserving input order
+// in the returned array (regardless of which items finish first). Used instead of a plain
+// `Promise.all(items.map(...))` for per-employee DB work — full unbounded concurrency was
+// tried first, but for a payroll with many employees it opened one connection per employee
+// per query *simultaneously* against the LMS/TimeStrap databases, which can exceed those
+// databases' own connection ceilings (often lower than this app's local pool `max`) and
+// cause OTHER requests to fail acquiring a connection at all. Capping concurrency keeps the
+// speed benefit of not running everything fully serial, without the connection-storm risk.
+async function mapWithConcurrency<T, R>(items: T[], limit: number, mapper: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex++;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 function createPool(connectionString: string) {
   const normalizedConnectionString = normalizeConnectionString(connectionString);
   return new Pool({
     connectionString: normalizedConnectionString,
     ssl: { rejectUnauthorized: false },
-    max: 20,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 2000,
+    max: 30,
+    idleTimeoutMillis: 120000,     // 2 minutes — give idle connections more breathing room
+    connectionTimeoutMillis: 30000, // 30 seconds — was 2s which killed complex queries
+    query_timeout: 60000,           // 60 seconds max per query
   });
 }
 
@@ -188,8 +211,8 @@ router.get('/payroll-processing', async (req, res) => {
     pClient = await payrollPool.connect();
     tClient = timesheetPool ? await timesheetPool.connect() : null;
 
-    // 1. Get all active employees
-    const empRes = await pClient.query('SELECT id, name, email, designation, department, employee_code, ctc, TO_CHAR(joining_date, \'YYYY-MM-DD\') AS joining_date FROM employees WHERE status = \'active\'');
+    // 1. Get all active employees (Sorted alphabetically)
+    const empRes = await pClient.query('SELECT id, name, email, designation, department, employee_code, ctc, TO_CHAR(joining_date, \'YYYY-MM-DD\') AS joining_date FROM employees WHERE status = \'active\' ORDER BY name ASC');
     const employees = empRes.rows;
 
     // 1b. Fetch payroll settings (PF/ESI/Tax) and active advances so the projected salary
@@ -661,7 +684,7 @@ router.get('/employees', async (_req, res) => {
     // full ISO timestamp that <input type="date"> can't parse — so the
     // Joining Date field silently shows blank when reopening Edit Employee.
     const result = await client.query(
-      `SELECT *, TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date FROM employees ORDER BY created_at DESC`
+      `SELECT *, TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date FROM employees ORDER BY name ASC`
     );
     console.log(`Found ${result.rows.length} employees`);
     res.json(result.rows);
@@ -2022,7 +2045,11 @@ router.get('/attendance/employees', async (req, res) => {
     const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const result = await client.query(
-      `SELECT DISTINCT emp_code FROM attendance_logs ${whereClause} ORDER BY emp_code`,
+      `SELECT DISTINCT a.emp_code 
+       FROM attendance_logs a
+       JOIN employees e ON (a.emp_code = e.employee_code OR a.emp_code = CAST(e.id AS text))
+       ${whereClause ? whereClause + " AND" : "WHERE"} e.status = 'active'
+       ORDER BY a.emp_code`,
       params
     );
 
@@ -2095,12 +2122,35 @@ router.get('/attendance/leaves', async (req, res) => {
 router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
   const { payrollId } = req.params;
 
-  let payrollClient, lmsClient, timesheetClient;
+  // Explicitly typed (rather than inferred) because these are now read inside the nested
+  // async closure passed to Promise.all/.map() below — TS can't narrow an inferred-any
+  // outer `let` across that function boundary, which otherwise surfaces as spurious
+  // "implicitly has an 'any' type" errors at every usage site.
+  let payrollClient: any, lmsClient: any, timesheetClient: any;
 
   try {
     payrollClient = await payrollPool.connect();
     lmsClient = lmsPool ? await lmsPool.connect() : null;
     timesheetClient = timesheetPool ? await timesheetPool.connect() : null;
+
+    // Build the TimeStrap employee-code map ONCE, up front — this used to be re-queried
+    // (a full table scan of the TimeStrap `employees` table) inside the per-employee loop
+    // below, so a payroll with N employees issued N redundant identical queries in serial.
+    // That serial round-tripping (on top of the per-employee LMS/attendance queries also
+    // done inside the loop) is what was blowing past connectionTimeoutMillis and surfacing
+    // as "Connection terminated due to connection timeout" on this endpoint.
+    const tsCodeMap = new Map<string, string>();
+    const tsNameMap = new Map<string, string>();
+    if (timesheetClient) {
+      const tsEmpRes = await timesheetClient.query('SELECT name, email, employee_code FROM employees');
+      tsEmpRes.rows.forEach((r: any) => {
+        if (r.employee_code) {
+          const code = r.employee_code.toUpperCase();
+          if (r.email) tsCodeMap.set(r.email.toLowerCase(), code);
+          if (r.name) tsNameMap.set(r.name.toLowerCase().trim(), code);
+        }
+      });
+    }
 
     const payrollResult = await payrollClient.query('SELECT month, year FROM payrolls WHERE id=$1', [payrollId]);
     const payroll = payrollResult.rows[0];
@@ -2149,8 +2199,13 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       [key: string]: unknown;
     }
 
-    const enriched = [];
-    for (const item of itemsResult.rows as (PayrollItemAnalysisRow & { monthly_salary: number })[]) {
+    // Process employees with BOUNDED concurrency (5 at a time) instead of either fully serial
+    // (the original code — safe but slow: 4 round trips × N employees, none overlapping) or
+    // fully unbounded parallel (tried next — fast, but opened up to N simultaneous connections
+    // against the LMS/TimeStrap databases and could exhaust their connection limits). 5 in
+    // flight at once gives most of the speed-up with a small, predictable connection footprint.
+    const ANALYSIS_CONCURRENCY = 5;
+    const enriched = await mapWithConcurrency(itemsResult.rows as (PayrollItemAnalysisRow & { monthly_salary: number })[], ANALYSIS_CONCURRENCY, async (item) => {
       const monthlySalary = item.monthly_salary || 0;
       let leaveData: { unpaid_leaves?: number; leave_type?: string; leave_dates?: string[]; od_dates?: string[]; permission_hours?: number } | null = null;
       let tsData: { missing_days?: number; submitted_at?: string | null; missing_dates?: string[]; excluded_dates?: string[] } | null = null;
@@ -2196,7 +2251,9 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
           `;
           const empCode = (item as any).employee_code || '';
           console.log(`[ANALYSIS] LMS query for ${item.employee_name}, code: ${empCode}`);
-          const leaveRes = await lmsClient.query(leaveQuery, [payroll.month, payroll.year, item.employee_name, empCode]);
+          // Use the pool (not the single shared lmsClient) so this employee's query can run
+          // concurrently with every other employee's — see Promise.all note above the loop.
+          const leaveRes = await lmsPool!.query(leaveQuery, [payroll.month, payroll.year, item.employee_name, empCode]);
           if (leaveRes.rows.length > 0) {
             const allLeaveDates: string[] = [];
             const odDates: string[] = [];
@@ -2304,7 +2361,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
                 OR ($3 ILIKE e.name || '%')
               )
           `;
-          const permRes = await lmsClient.query(permQuery, [payroll.month, payroll.year, item.employee_name, (item as any).employee_code || '']);
+          const permRes = await lmsPool!.query(permQuery, [payroll.month, payroll.year, item.employee_name, (item as any).employee_code || '']);
           if (permRes.rows.length > 0 && permRes.rows[0].total) {
             const permHours = parseFloat(permRes.rows[0].total);
             console.log(`[ANALYSIS] ✅ ${item.employee_name} has ${permHours} permission hours.`);
@@ -2320,18 +2377,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       const calendarDays = new Date(payroll.year, payroll.month, 0).getDate();
       if (timesheetClient) {
         try {
-          // Build an employee-code map from TimeStrap so email/name resolution is robust.
-          const tsCodeMap = new Map<string, string>();
-          const tsNameMap = new Map<string, string>();
-          const tsEmpRes = await timesheetClient.query('SELECT name, email, employee_code FROM employees');
-          tsEmpRes.rows.forEach((r: any) => {
-            if (r.employee_code) {
-              const code = r.employee_code.toUpperCase();
-              if (r.email) tsCodeMap.set(r.email.toLowerCase(), code);
-              if (r.name) tsNameMap.set(r.name.toLowerCase().trim(), code);
-            }
-          });
-
+          // tsCodeMap / tsNameMap are built once, above, outside this loop.
           const emailKey = (item.employee_email || '').toLowerCase();
           const nameKey = (item.employee_name || '').toLowerCase().trim();
           const explicitCode = (item as any).employee_code || null;
@@ -2353,7 +2399,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
             // No code at all — cannot look up → fall back to stored DB values unchanged
             tsData = null;
           } else {
-            const tsRes = await timesheetClient.query(
+            const tsRes = await timesheetPool!.query(
               `SELECT DISTINCT CAST(date AS date) AS d
                FROM time_entries
                WHERE UPPER(employee_code) = ANY($1) AND EXTRACT(MONTH FROM CAST(date as date)) = $2 AND EXTRACT(YEAR FROM CAST(date as date)) = $3
@@ -2499,7 +2545,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       if (empCode) {
         try {
           // Get all dates this employee has attendance records for
-          const attRes = await payrollClient.query(
+          const attRes = await payrollPool.query(
             `SELECT 
                TO_CHAR(punch_time, 'YYYY-MM-DD') as att_date,
                MIN(punch_time) as first_punch,
@@ -2622,7 +2668,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
         Math.round((baseSalaryForPay - leaveDeduction - timesheetDeduction - missingPunchDeduction - sandwichDeductionAmount - permissionDeduction - hourlyDeductionStored - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction + bonus + sundayEarnings) * 100) / 100
       );
 
-      enriched.push({
+      return {
         ...item,
         employee: {
           id: item.employee_id,
@@ -2680,8 +2726,8 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
         timesheet_excluded_dates: finalExcludedDates,
         holiday_dates: finalHolidayDates,
         leave_dates: leaveDatesArray,
-      });
-    }
+      };
+    });
 
     console.log(`Sending enriched analysis for ${enriched.length} items...`);
     res.json(enriched);
@@ -3132,7 +3178,7 @@ router.get('/daily-analysis', async (req, res) => {
   let pClient, lmsClient, timesheetClient;
   try {
     pClient = await payrollPool.connect();
-    const empRes = await pClient.query("SELECT id, name, email, department, employee_code FROM employees WHERE status = 'active'");
+    const empRes = await pClient.query("SELECT id, name, email, department, employee_code FROM employees WHERE status = 'active' ORDER BY name ASC");
     const employees = empRes.rows;
 
     const attRes = await pClient.query(

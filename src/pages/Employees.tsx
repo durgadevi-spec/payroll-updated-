@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { UserPlus, Search, Pencil, Trash2, Building2, Mail, Calendar } from 'lucide-react';
+import { UserPlus, Search, Pencil, Trash2, Building2, Mail, Calendar, Download } from 'lucide-react';
 import { Employee } from '../types';
 import { useToast } from '../context/ToastContext';
 import { formatCurrency } from '../lib/payrollCalculator';
@@ -9,13 +9,15 @@ import { Modal } from '../components/ui/Modal';
 import { Badge } from '../components/ui/Badge';
 import { TableSkeleton } from '../components/ui/Skeleton';
 import { EmployeeForm } from '../components/employees/EmployeeForm';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 export function Employees() {
   const { showToast } = useToast();
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('active');
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Employee | null>(null);
   const [deleting, setDeleting] = useState<Employee | null>(null);
@@ -105,6 +107,53 @@ export function Employees() {
     return matchSearch && matchStatus;
   });
 
+  const downloadPDF = () => {
+    try {
+      const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+      const pageWidth = doc.internal.pageSize.getWidth();
+
+      doc.setFillColor(15, 23, 42);
+      doc.rect(0, 0, pageWidth, 20, 'F');
+      
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(14);
+      doc.setFont('helvetica', 'bold');
+      doc.text('EMPLOYEES REPORT', 15, 13);
+      
+      doc.setFontSize(9);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(148, 163, 184);
+      const printDate = new Date().toLocaleDateString('en-US');
+      doc.text(`Printed: ${printDate} | knockturn Payroll System`, 15, 28);
+      
+      const tableData = filtered.map(emp => [
+        emp.name,
+        emp.employee_code || '-',
+        emp.email,
+        emp.department || '-',
+        emp.designation || '-',
+        formatCurrency(emp.ctc),
+        emp.joining_date ? new Date(emp.joining_date).toLocaleDateString('en-IN') : '-',
+        emp.status
+      ]);
+
+      autoTable(doc, {
+        startY: 35,
+        head: [['Name', 'Emp Code', 'Email', 'Department', 'Designation', 'CTC', 'Joining Date', 'Status']],
+        body: tableData,
+        theme: 'striped',
+        headStyles: { fillColor: [79, 70, 229], textColor: 255 },
+        styles: { fontSize: 8 },
+        margin: { left: 15, right: 15 }
+      });
+      
+      doc.save('employees_report.pdf');
+    } catch (e) {
+      console.error('Failed to generate PDF:', e);
+      showToast('error', 'Failed to generate PDF report');
+    }
+  };
+
   return (
     <div className="space-y-5">
       <div className="flex flex-col sm:flex-row sm:items-center gap-3">
@@ -129,6 +178,9 @@ export function Employees() {
           ))}
         </div>
         <div className="flex gap-2">
+          <Button variant="outline" icon={<Download size={16} />} onClick={downloadPDF} title="Download PDF">
+            PDF
+          </Button>
           <Button variant="outline" icon={<UserPlus size={16} />} onClick={handleSyncBiometric}>
             Sync Biometric
           </Button>

@@ -58,8 +58,9 @@ export const requireEmployeeAuth = async (req: AuthenticatedRequest, res: Respon
     }
 
     const employee = result.rows[0];
+    const normalizedRole = String(employee.role || 'employee').trim().toLowerCase();
     req.employee = employee;
-    req.role = employee.role || 'employee';
+    req.role = normalizedRole === 'admin' ? 'admin' : 'employee';
     next();
   } catch (err) {
     console.error('Error in requireEmployeeAuth:', err);

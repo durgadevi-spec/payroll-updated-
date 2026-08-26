@@ -2,21 +2,25 @@ require('dotenv').config();
 const { Pool } = require('pg');
 const pool = new Pool({ connectionString: process.env.PAYROLL_DATABASE_URL });
 
+// Adds the columns needed to support the "Missing Punch Exception" feature:
+// admins can waive the salary deduction for individual missing-punch days
+// (selected via checkboxes, one per date), rather than only all-or-nothing.
 async function run() {
-    try {
-        const res = await pool.query(
-            "SELECT column_name FROM information_schema.columns WHERE table_name='payroll_items' AND column_name LIKE 'missing_punch_exception%'"
-        );
-        console.log('Found columns:', res.rows.map(r => r.column_name));
-        if (res.rows.length === 3) {
-            console.log('✅ All 3 columns exist — migration succeeded.');
-        } else {
-            console.log(`⚠️ Only ${res.rows.length} of 3 expected columns found.`);
-        }
-    } catch (err) {
-        console.error('Error checking columns:', err);
-    } finally {
-        process.exit(0);
-    }
+  try {
+    console.log('Adding missing_punch_exception_dates column...');
+    await pool.query("ALTER TABLE payroll_items ADD COLUMN IF NOT EXISTS missing_punch_exception_dates JSONB DEFAULT '[]'");
+
+    console.log('Adding missing_punch_exception_note column...');
+    await pool.query('ALTER TABLE payroll_items ADD COLUMN IF NOT EXISTS missing_punch_exception_note TEXT');
+
+    console.log('Adding missing_punch_exception_granted_at column...');
+    await pool.query('ALTER TABLE payroll_items ADD COLUMN IF NOT EXISTS missing_punch_exception_granted_at TIMESTAMPTZ');
+
+    console.log('Success!');
+  } catch (err) {
+    console.error('Error modifying table:', err);
+  } finally {
+    process.exit(0);
+  }
 }
 run();

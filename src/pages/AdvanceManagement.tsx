@@ -23,6 +23,8 @@ import {
 } from 'lucide-react';
 import { format, addMonths } from 'date-fns';
 import { useAuth } from '../context/AuthContext';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 const ADVANCE_TYPES = ['Salary Advance', 'Medical', 'Travel', 'Education', 'Emergency', 'Festival', 'Other'];
 const EXPENSE_CATEGORIES = ['Project', 'Salary', 'Admin'];
@@ -79,7 +81,7 @@ export function AdvanceManagement() {
   });
   const [attachmentError, setAttachmentError] = useState('');
 
-  // --- New: Zoho-style advance request workflow state ---
+  // --- New: advance request workflow state ---
   const [activeTab, setActiveTab] = useState<StatusTab>('All');
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [requestSubmitting, setRequestSubmitting] = useState(false);
@@ -516,6 +518,52 @@ export function AdvanceManagement() {
     .filter(a => activeTab === 'All' || a.status === activeTab)
     .filter(a => !searchQuery || a.employee_name?.toLowerCase().includes(searchQuery.toLowerCase()));
 
+  const downloadAdvancesPDF = () => {
+    try {
+      const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+      const pageWidth = doc.internal.pageSize.getWidth();
+
+      doc.setFillColor(15, 23, 42);
+      doc.rect(0, 0, pageWidth, 20, 'F');
+      
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(14);
+      doc.setFont('helvetica', 'bold');
+      doc.text('ADVANCES REPORT', 15, 13);
+      
+      doc.setFontSize(9);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(148, 163, 184);
+      const printDate = new Date().toLocaleDateString('en-US');
+      doc.text(`Printed: ${printDate} | Knockturn Payroll System`, 15, 28);
+      
+      const tableData = visibleAdvances.map((adv: any) => [
+        adv.employee_name,
+        format(new Date(adv.date), 'dd MMM yyyy'),
+        adv.expense_category || '-',
+        adv.advance_type || '-',
+        `Rs. ${Number(adv.amount).toLocaleString()}`,
+        `Rs. ${Number(adv.balance).toLocaleString()}`,
+        adv.repayment_type || '-',
+        adv.status
+      ]);
+
+      autoTable(doc, {
+        startY: 35,
+        head: [['Employee', 'Date', 'Category', 'Type', 'Amount', 'Balance', 'Repayment', 'Status']],
+        body: tableData,
+        theme: 'striped',
+        headStyles: { fillColor: [79, 70, 229], textColor: 255 },
+        styles: { fontSize: 9 },
+        margin: { left: 15, right: 15 }
+      });
+      
+      doc.save('advances_report.pdf');
+    } catch (e) {
+      console.error('Failed to generate PDF:', e);
+    }
+  };
+
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
@@ -570,6 +618,14 @@ export function AdvanceManagement() {
               </div>
               <button className="p-2 border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 rounded-lg text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-700">
                 <Filter size={16} />
+              </button>
+              <button 
+                onClick={downloadAdvancesPDF}
+                className="flex items-center gap-2 p-2 px-3 border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 rounded-lg text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 text-sm font-medium transition-colors"
+                title="Download PDF"
+              >
+                <Download size={16} />
+                <span className="hidden sm:inline">PDF</span>
               </button>
             </div>
           </div>
@@ -789,7 +845,7 @@ export function AdvanceManagement() {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Expense Category (Zoho)</label>
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Expense Category</label>
                   <select
                     value={formData.expense_category}
                     onChange={e => {
@@ -800,7 +856,7 @@ export function AdvanceManagement() {
                   >
                     {EXPENSE_CATEGORIES.map(c => <option key={c} value={c}>{c} Expense</option>)}
                   </select>
-                  <p className="text-xs text-slate-400">Head this gets booked under in Zoho when the advance closes</p>
+                  <p className="text-xs text-slate-400">Head this gets booked under when the advance closes</p>
                 </div>
                 <div className="space-y-1.5">
                   <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Settlement Type</label>
@@ -885,7 +941,7 @@ export function AdvanceManagement() {
         </div>
       )}
 
-      {/* Raise Advance Request Modal (Zoho-style employee self-service request) */}
+      {/* Raise Advance Request Modal (Employee self-service request) */}
       {showRequestModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-white dark:bg-slate-900 rounded-xl shadow-xl w-full max-w-3xl border border-slate-200 dark:border-slate-700 max-h-[90vh] flex flex-col my-8">
@@ -1025,7 +1081,7 @@ export function AdvanceManagement() {
               <div className="flex justify-between"><span className="text-slate-500">Amount</span><span className="font-medium text-slate-900 dark:text-white">₹{Number(approvingAdv.amount).toLocaleString()}</span></div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
-                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Expense Category (Zoho)</label>
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Expense Category</label>
                   <select
                     value={approveExpenseCategory}
                     onChange={e => {
@@ -1248,7 +1304,7 @@ export function AdvanceManagement() {
 
               {(detailsAdv.status === 'Active' || detailsAdv.status === 'Closed') && (
                 <div>
-                  <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">Disbursement / Zoho Reconciliation</h3>
+                  <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">Disbursement / Reconciliation</h3>
                   <div className="border border-slate-200 dark:border-slate-700 rounded-lg divide-y divide-slate-200 dark:divide-slate-700 text-sm">
                     <div className="flex justify-between px-4 py-2.5"><span className="text-slate-500">Expense Category</span><span className="font-medium text-slate-800 dark:text-slate-200">{detailsAdv.expense_category || '—'} Expense</span></div>
                     <div className="flex justify-between px-4 py-2.5"><span className="text-slate-500">Payment Mode</span><span className="font-medium text-slate-800 dark:text-slate-200">{detailsAdv.payment_mode || '—'}</span></div>

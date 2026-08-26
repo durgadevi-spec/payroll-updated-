@@ -91,6 +91,11 @@ export function Login() {
                   {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
                 </button>
               </div>
+              <div className="text-right mt-1.5">
+                <Link to="/forgot-password" className="text-blue-400 hover:text-blue-300 text-xs font-medium">
+                  Forgot password?
+                </Link>
+              </div>
             </div>
 
             <Button type="submit" loading={loading} className="w-full mt-2 py-2.5">
