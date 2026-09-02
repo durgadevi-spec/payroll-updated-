@@ -34,6 +34,17 @@ function createPool(url: string) {
 const payrollPool = createPool(payrollUrl);
 const timesheetPool = timesheetUrl ? createPool(timesheetUrl) : null;
 
+async function safeConnectOptionalPool(pool: any) {
+  if (!pool) return null;
+
+  try {
+    return await pool.connect();
+  } catch (error) {
+    console.warn('[ALERTS] Optional timesheet DB unavailable; continuing without it:', error instanceof Error ? error.message : error);
+    return null;
+  }
+}
+
 // ─── Email sender ─────────────────────────────────────────────────────────────
 
 async function getAlertSettings(client: any): Promise<{
@@ -147,33 +158,37 @@ export async function runNightlyAlerts(testDate?: string) {
     const tsNameMap = new Map<string, string>();
 
     if (timesheetPool) {
-      tsClient = await timesheetPool.connect();
-      const tsEmpRes = await tsClient.query('SELECT name, email, employee_code FROM employees');
-      tsEmpRes.rows.forEach((r: any) => {
-        if (r.employee_code) {
-          const code = r.employee_code.toUpperCase();
-          if (r.email) tsCodeMap.set(r.email.toLowerCase(), code);
-          if (r.name) tsNameMap.set(r.name.toLowerCase().trim(), code);
-        }
-      });
+      tsClient = await safeConnectOptionalPool(timesheetPool);
+      if (!tsClient) {
+        console.warn('[ALERTS] Skipping time-sheet checks because the TimeStrap database is unavailable.');
+      } else {
+        const tsEmpRes = await tsClient.query('SELECT name, email, employee_code FROM employees');
+        tsEmpRes.rows.forEach((r: any) => {
+          if (r.employee_code) {
+            const code = r.employee_code.toUpperCase();
+            if (r.email) tsCodeMap.set(r.email.toLowerCase(), code);
+            if (r.name) tsNameMap.set(r.name.toLowerCase().trim(), code);
+          }
+        });
 
-      const tsRes = await tsClient.query(
-        `SELECT employee_code, SUM(
-          CASE 
-            WHEN total_hours ~ '^\\d+h\\s*\\d+m$' THEN
-              (REGEXP_MATCH(total_hours, '(\\d+)h'))[1]::int * 60 + (REGEXP_MATCH(total_hours, '(\\d+)m'))[1]::int
-            WHEN total_hours ~ '^\\d+h$' THEN
-              (REGEXP_MATCH(total_hours, '(\\d+)h'))[1]::int * 60
-            ELSE 0
-          END
-        ) as total_minutes
-        FROM time_entries WHERE CAST(date AS date) = $1 GROUP BY employee_code`,
-        [dateStr]
-      );
-      tsRes.rows.forEach((r: any) => {
-        const code = (r.employee_code || '').toUpperCase();
-        if (code) timesheetMap.set(code, { minutes: parseInt(r.total_minutes) || 0 });
-      });
+        const tsRes = await tsClient.query(
+          `SELECT employee_code, SUM(
+            CASE 
+              WHEN total_hours ~ '^\\d+h\\s*\\d+m$' THEN
+                (REGEXP_MATCH(total_hours, '(\\d+)h'))[1]::int * 60 + (REGEXP_MATCH(total_hours, '(\\d+)m'))[1]::int
+              WHEN total_hours ~ '^\\d+h$' THEN
+                (REGEXP_MATCH(total_hours, '(\\d+)h'))[1]::int * 60
+              ELSE 0
+            END
+          ) as total_minutes
+          FROM time_entries WHERE CAST(date AS date) = $1 GROUP BY employee_code`,
+          [dateStr]
+        );
+        tsRes.rows.forEach((r: any) => {
+          const code = (r.employee_code || '').toUpperCase();
+          if (code) timesheetMap.set(code, { minutes: parseInt(r.total_minutes) || 0 });
+        });
+      }
     }
 
     // ── 3. Fetch attendance for yesterday and day-before ─────────────────────

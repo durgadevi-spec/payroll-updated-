@@ -69,6 +69,19 @@ function createPool(connectionString: string) {
   });
 }
 
+type PgPool = ReturnType<typeof createPool>;
+
+async function safeConnectOptionalPool(pool: PgPool | null) {
+  if (!pool) return null;
+
+  try {
+    return await pool.connect();
+  } catch (error) {
+    console.warn('[DB] Optional database unavailable; continuing without it:', error instanceof Error ? error.message : error);
+    return null;
+  }
+}
+
 export const payrollPool = createPool(payrollUrl);
 const lmsPool = lmsUrl ? createPool(lmsUrl) : null;
 const timesheetPool = timesheetUrl ? createPool(timesheetUrl) : null;
@@ -1057,8 +1070,8 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
   let pClient, lmsClient, tsClient;
   try {
     pClient = await payrollPool.connect();
-    lmsClient = lmsPool ? await lmsPool.connect() : null;
-    tsClient = timesheetPool ? await timesheetPool.connect() : null;
+    lmsClient = await safeConnectOptionalPool(lmsPool);
+    tsClient = await safeConnectOptionalPool(timesheetPool);
 
     // Fetch employees
     const empRes = await pClient.query('SELECT id, name, email, employee_code, ctc, use_pa_sla, pa_sla_balance, joining_date, relieving_date FROM employees WHERE id = ANY($1)', [employeeIds]);
