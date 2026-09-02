@@ -37,15 +37,33 @@ const getEligibleDaysForMonth = (
   joiningDate: string | null | undefined,
   month: number,
   year: number,
-  calendarDays: number
+  calendarDays: number,
+  relievingDate?: string | null | undefined
 ): number => {
-  if (!joiningDate) return calendarDays;
-  const parts = joiningDate.split('-').map(Number);
-  if (parts.length !== 3 || parts.some(isNaN)) return calendarDays;
-  const [jy, jm, jd] = parts;
-  if (jy < year || (jy === year && jm < month)) return calendarDays; // joined before this month
-  if (jy > year || (jy === year && jm > month)) return 0; // joins in a future month
-  return Math.max(0, calendarDays - jd + 1); // joined during this month
+  let startDay = 1;
+  let endDay = calendarDays;
+
+  if (joiningDate) {
+    const parts = joiningDate.split('-').map(Number);
+    if (parts.length === 3 && !parts.some(isNaN)) {
+      const [jy, jm, jd] = parts;
+      if (jy > year || (jy === year && jm > month)) return 0; // joins in a future month
+      if (jy === year && jm === month) startDay = jd; // joined during this month
+      // else: joined before this month — startDay stays 1
+    }
+  }
+
+  if (relievingDate) {
+    const parts = relievingDate.split('-').map(Number);
+    if (parts.length === 3 && !parts.some(isNaN)) {
+      const [ry, rm, rd] = parts;
+      if (ry < year || (ry === year && rm < month)) return 0; // relieved before this month — no longer employed
+      if (ry === year && rm === month) endDay = rd; // relieved during this month
+      // else: relieved after this month — endDay stays calendarDays
+    }
+  }
+
+  return Math.max(0, endDay - startDay + 1);
 };
 
 // Whether a payroll item belongs to an employee who joined mid-way through
@@ -55,8 +73,21 @@ const isMidMonthJoinerItem = (item: PayrollItemWithEmployee, month?: number, yea
   const joiningDate = item.employee?.joining_date;
   if (!joiningDate) return false;
   const calendarDays = new Date(year, month, 0).getDate();
-  const eligibleDays = getEligibleDaysForMonth(joiningDate, month, year, calendarDays);
+  const eligibleDays = getEligibleDaysForMonth(joiningDate, month, year, calendarDays, item.employee?.relieving_date);
   return eligibleDays < calendarDays;
+};
+
+// Whether a payroll item belongs to an employee who was relieved (last
+// working day) part-way through this specific payroll month (used to show
+// a "Relieved" indicator, mirroring isMidMonthJoinerItem above).
+const isMidMonthLeaverItem = (item: PayrollItemWithEmployee, month?: number, year?: number): boolean => {
+  if (!month || !year) return false;
+  const relievingDate = item.employee?.relieving_date;
+  if (!relievingDate) return false;
+  const parts = relievingDate.split('-').map(Number);
+  if (parts.length !== 3 || parts.some(isNaN)) return false;
+  const [ry, rm] = parts;
+  return ry === year && rm === month;
 };
 
 // Returns the Sunday dates ('YYYY-MM-DD') that fall inside this employee's
@@ -78,8 +109,10 @@ const getAutoExcludedSundays = (
   if (!month || !year) return [];
   const calendarDays = new Date(year, month, 0).getDate();
   const joiningDate = item.employee?.joining_date;
+  const relievingDate = item.employee?.relieving_date;
 
   let startDay = 1;
+  let endDay = calendarDays;
   if (joiningDate) {
     const parts = joiningDate.split('-').map(Number);
     if (parts.length === 3 && !parts.some(isNaN)) {
@@ -92,10 +125,22 @@ const getAutoExcludedSundays = (
       // else: joined before this month — window is the full month (startDay stays 1)
     }
   }
+  if (relievingDate) {
+    const parts = relievingDate.split('-').map(Number);
+    if (parts.length === 3 && !parts.some(isNaN)) {
+      const [ry, rm, rd] = parts;
+      if (ry === year && rm === month) {
+        endDay = rd; // relieved mid-month — window ends on relieving day
+      } else if (ry < year || (ry === year && rm < month)) {
+        return []; // relieved before this month — no window this month at all
+      }
+      // else: relieved after this month — window runs to month-end (endDay stays calendarDays)
+    }
+  }
 
   const holidaySet = new Set(holidayDates);
   const sundays: string[] = [];
-  for (let d = startDay; d <= calendarDays; d++) {
+  for (let d = startDay; d <= endDay; d++) {
     const dt = new Date(year, month - 1, d);
     if (dt.getDay() !== 0) continue; // 0 = Sunday
     const dstr = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
@@ -504,12 +549,13 @@ export function Payroll() {
 
         const advanceDeduction = advanceByEmp.get(emp.id) || 0;
 
-        // Mid-month joiner handling: if this employee's joining_date falls
-        // within the payroll month, prorate their base salary to only the
-        // days they were actually employed (joining date → month end), and
-        // make sure attendance/leave/timesheet checks (done upstream, in the
-        // preview data) only counted days from their joining date onward.
-        const eligibleDays = getEligibleDaysForMonth(emp.joining_date, genMonth, genYear, calendarDays);
+        // Mid-month joiner/leaver handling: if this employee's joining_date
+        // and/or relieving_date falls within the payroll month, prorate their
+        // base salary to only the days they were actually employed (joining
+        // date → relieving date, or month end if not relieved), and make sure
+        // attendance/leave/timesheet checks (done upstream, in the preview
+        // data) only counted days within that window.
+        const eligibleDays = getEligibleDaysForMonth(emp.joining_date, genMonth, genYear, calendarDays, emp.relieving_date);
         const isMidMonthJoiner = eligibleDays < calendarDays;
 
         const totalUnpaid = emp.summary.unpaidDays || 0;
@@ -1670,6 +1716,14 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                           New joiner
                         </div>
                       )}
+                      {isMidMonthLeaverItem(item, month, year) && (
+                        <div
+                          className="text-[10px] text-amber-600 dark:text-amber-400 font-medium mt-0.5"
+                          title={`Relieved ${item.employee?.relieving_date} — salary prorated till that date`}
+                        >
+                          Relieved
+                        </div>
+                      )}
                     </td>
                     <td className="py-2 px-3 text-slate-600 dark:text-slate-300 font-medium border-r border-b border-slate-100 dark:border-slate-800">
                       {item.calculation_days || (item.working_days || 26)}d
@@ -2041,6 +2095,12 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                 <div className="col-span-2 flex gap-2 items-center text-indigo-600 dark:text-indigo-400">
                   <span className="font-semibold">NEW JOINER:</span>
                   <span>Joined {salarySlipModal.employee?.joining_date} — salary prorated from that date</span>
+                </div>
+              )}
+              {isMidMonthLeaverItem(salarySlipModal, month, year) && (
+                <div className="col-span-2 flex gap-2 items-center text-amber-600 dark:text-amber-400">
+                  <span className="font-semibold">RELIEVED:</span>
+                  <span>Relieved {salarySlipModal.employee?.relieving_date} — salary prorated till that date</span>
                 </div>
               )}
 

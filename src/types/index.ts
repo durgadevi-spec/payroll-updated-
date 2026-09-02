@@ -8,6 +8,7 @@ export interface Employee {
   department: string;
   designation: string;
   joining_date: string | null;
+  relieving_date: string | null;
   bank_name: string;
   bank_account: string;
   ifsc_code: string;

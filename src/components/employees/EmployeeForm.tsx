@@ -30,6 +30,7 @@ export function EmployeeForm({ initial, onSubmit, onCancel, loading }: EmployeeF
     department: initial?.department || '',
     designation: initial?.designation || '',
     joining_date: initial?.joining_date || '',
+    relieving_date: initial?.relieving_date || '',
     bank_name: initial?.bank_name || '',
     bank_account: initial?.bank_account || '',
     ifsc_code: initial?.ifsc_code || '',
@@ -90,6 +91,13 @@ export function EmployeeForm({ initial, onSubmit, onCancel, loading }: EmployeeF
           <Input label="Email" type="email" value={form.email} onChange={set('email')} required placeholder="john@company.com" />
           <Input label="CTC/Annum (₹)" type="number" value={form.ctc || ''} onChange={set('ctc')} required placeholder="12000" min="0" prefix="₹" />
           <Input label="Joining Date" type="date" value={form.joining_date || ''} onChange={set('joining_date')} />
+          <Input
+            label="Relieving Date (Last Working Day)"
+            type="date"
+            value={form.relieving_date || ''}
+            onChange={set('relieving_date')}
+            hint="Leave blank if still active. If set, salary for that month is auto-prorated up to this date."
+          />
         </div>
       </div>
 

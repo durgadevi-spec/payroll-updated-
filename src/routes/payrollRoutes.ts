@@ -191,15 +191,33 @@ function getEligibleDaysForMonthServer(
   joiningDate: string | null | undefined,
   month: number,
   year: number,
-  calendarDays: number
+  calendarDays: number,
+  relievingDate?: string | null | undefined
 ): number {
-  if (!joiningDate) return calendarDays;
-  const parts = String(joiningDate).split('-').map(Number);
-  if (parts.length !== 3 || parts.some((n) => isNaN(n))) return calendarDays;
-  const [jy, jm, jd] = parts;
-  if (jy < year || (jy === year && jm < month)) return calendarDays; // joined before this month
-  if (jy > year || (jy === year && jm > month)) return 0; // joins in a future month
-  return Math.max(0, calendarDays - jd + 1); // joined during this month
+  let startDay = 1;
+  let endDay = calendarDays;
+
+  if (joiningDate) {
+    const parts = String(joiningDate).split('-').map(Number);
+    if (parts.length === 3 && !parts.some((n) => isNaN(n))) {
+      const [jy, jm, jd] = parts;
+      if (jy > year || (jy === year && jm > month)) return 0; // joins in a future month
+      if (jy === year && jm === month) startDay = jd; // joined during this month
+      // else: joined before this month — startDay stays 1
+    }
+  }
+
+  if (relievingDate) {
+    const parts = String(relievingDate).split('-').map(Number);
+    if (parts.length === 3 && !parts.some((n) => isNaN(n))) {
+      const [ry, rm, rd] = parts;
+      if (ry < year || (ry === year && rm < month)) return 0; // relieved before this month
+      if (ry === year && rm === month) endDay = rd; // relieved during this month
+      // else: relieved after this month — endDay stays calendarDays
+    }
+  }
+
+  return Math.max(0, endDay - startDay + 1);
 }
 
 router.get('/payroll-processing', async (req, res) => {
@@ -212,7 +230,7 @@ router.get('/payroll-processing', async (req, res) => {
     tClient = timesheetPool ? await timesheetPool.connect() : null;
 
     // 1. Get all active employees (Sorted alphabetically)
-    const empRes = await pClient.query('SELECT id, name, email, designation, department, employee_code, ctc, TO_CHAR(joining_date, \'YYYY-MM-DD\') AS joining_date FROM employees WHERE status = \'active\' ORDER BY name ASC');
+    const empRes = await pClient.query('SELECT id, name, email, designation, department, employee_code, ctc, TO_CHAR(joining_date, \'YYYY-MM-DD\') AS joining_date, TO_CHAR(relieving_date, \'YYYY-MM-DD\') AS relieving_date FROM employees WHERE status = \'active\' ORDER BY name ASC');
     const employees = empRes.rows;
 
     // 1b. Fetch payroll settings (PF/ESI/Tax) and active advances so the projected salary
@@ -447,7 +465,7 @@ router.get('/payroll-processing', async (req, res) => {
       // Mid-month joiner handling: prorate the projected salary the same way the
       // real generation step does, so this dashboard number isn't misleading for
       // employees who joined partway through the month.
-      const eligibleDays = getEligibleDaysForMonthServer(emp.joining_date, Number(month), Number(year), calendarDays);
+      const eligibleDays = getEligibleDaysForMonthServer(emp.joining_date, Number(month), Number(year), calendarDays, emp.relieving_date);
       const isMidMonthJoiner = eligibleDays < calendarDays;
 
       const summary = previewSummaryMap.get(emp.id);
@@ -684,7 +702,7 @@ router.get('/employees', async (_req, res) => {
     // full ISO timestamp that <input type="date"> can't parse — so the
     // Joining Date field silently shows blank when reopening Edit Employee.
     const result = await client.query(
-      `SELECT *, TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date FROM employees ORDER BY name ASC`
+      `SELECT *, TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date, TO_CHAR(relieving_date, 'YYYY-MM-DD') AS relieving_date FROM employees ORDER BY name ASC`
     );
     console.log(`Found ${result.rows.length} employees`);
     res.json(result.rows);
@@ -706,6 +724,7 @@ router.post('/employees', async (req, res) => {
     department = '',
     designation = '',
     joining_date = null,
+    relieving_date = null,
     bank_name = '',
     bank_account = '',
     ifsc_code = '',
@@ -718,14 +737,15 @@ router.post('/employees', async (req, res) => {
   } = req.body;
 
   const validJoiningDate = joining_date && joining_date !== "" ? joining_date : null;
+  const validRelievingDate = relieving_date && relieving_date !== "" ? relieving_date : null;
 
   let client;
   try {
     client = await payrollPool.connect();
     const insert = await client.query(
-      `INSERT INTO employees (name, email, employee_code, ctc, reporting_manager, department, designation, joining_date, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING *, TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date`,
-      [name, email, employee_code || null, ctc, reporting_manager, department, designation, validJoiningDate, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance]
+      `INSERT INTO employees (name, email, employee_code, ctc, reporting_manager, department, designation, joining_date, relieving_date, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING *, TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date, TO_CHAR(relieving_date, 'YYYY-MM-DD') AS relieving_date`,
+      [name, email, employee_code || null, ctc, reporting_manager, department, designation, validJoiningDate, validRelievingDate, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance]
     );
 
     const employee = insert.rows[0];
@@ -754,6 +774,7 @@ router.put('/employees/:id', async (req, res) => {
     department = '',
     designation = '',
     joining_date = null,
+    relieving_date = null,
     bank_name = '',
     bank_account = '',
     ifsc_code = '',
@@ -766,14 +787,15 @@ router.put('/employees/:id', async (req, res) => {
   } = req.body;
 
   const validJoiningDate = joining_date && joining_date !== "" ? joining_date : null;
+  const validRelievingDate = relieving_date && relieving_date !== "" ? relieving_date : null;
 
   let client;
   try {
     client = await payrollPool.connect();
     const update = await client.query(
-      `UPDATE employees SET name=$1, email=$2, employee_code=$3, ctc=$4, reporting_manager=$5, department=$6, designation=$7, joining_date=$8, bank_name=$9, bank_account=$10, ifsc_code=$11, pf_number=$12, esi_number=$13, uan_number=$14, status=$15, use_pa_sla=$16, pa_sla_balance=$17, updated_at=NOW()
-       WHERE id=$18 RETURNING *, TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date`,
-      [name, email, employee_code || null, ctc, reporting_manager, department, designation, validJoiningDate, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance, id]
+      `UPDATE employees SET name=$1, email=$2, employee_code=$3, ctc=$4, reporting_manager=$5, department=$6, designation=$7, joining_date=$8, relieving_date=$9, bank_name=$10, bank_account=$11, ifsc_code=$12, pf_number=$13, esi_number=$14, uan_number=$15, status=$16, use_pa_sla=$17, pa_sla_balance=$18, updated_at=NOW()
+       WHERE id=$19 RETURNING *, TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date, TO_CHAR(relieving_date, 'YYYY-MM-DD') AS relieving_date`,
+      [name, email, employee_code || null, ctc, reporting_manager, department, designation, validJoiningDate, validRelievingDate, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance, id]
     );
 
     const employee = update.rows[0];
@@ -1039,7 +1061,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
     tsClient = timesheetPool ? await timesheetPool.connect() : null;
 
     // Fetch employees
-    const empRes = await pClient.query('SELECT id, name, email, employee_code, ctc, use_pa_sla, pa_sla_balance, joining_date FROM employees WHERE id = ANY($1)', [employeeIds]);
+    const empRes = await pClient.query('SELECT id, name, email, employee_code, ctc, use_pa_sla, pa_sla_balance, joining_date, relieving_date FROM employees WHERE id = ANY($1)', [employeeIds]);
     const employees = empRes.rows;
 
     // Helper to format date - Use UTC to avoid timezone shift
@@ -1216,6 +1238,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
         name: emp.name,
         ctc: emp.ctc || 0,
         joining_date: emp.joining_date ? formatLocalDate(emp.joining_date) : null,
+        relieving_date: emp.relieving_date ? formatLocalDate(emp.relieving_date) : null,
         days: [] as any[],
         summary: {
           totalPayable: 0,
@@ -1272,6 +1295,40 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
             paid_unpaid: 'Not Joined',
             salary_deduction_applicable: false,
             deduction_reason: 'Before joining date',
+            sunday_sandwich: false,
+            permission_status: 'None',
+            permission_from: '-',
+            permission_to: '-',
+            permission_hours: '0.0',
+            monthly_permission_used: '0.00',
+            monthly_permission_remaining: '3.00',
+            half_day_leave_status: 'None',
+            eligible_hours: '0.00',
+            deductible_short_hours: '0.00',
+            hourly_deduction_amount: 0
+          });
+          continue;
+        }
+
+        // Employee's last working day (relieving date) was before this
+        // date — they'd already left, so this day has no attendance/leave/
+        // timesheet expectation and must not count toward payable days or
+        // any deduction. Mirrors the "Not Joined" block above.
+        if (empData.relieving_date && dStr > empData.relieving_date) {
+          empData.days.push({
+            date: dStr,
+            day: curr.toLocaleDateString('en-US', { weekday: 'short' }),
+            punch_in: '-',
+            punch_out: '-',
+            total_hours: '0.0',
+            required_hours: 9,
+            attendance_status: 'Relieved',
+            timesheet_status: 'N/A',
+            lms_leave_status: 'N/A',
+            leave_type: '-',
+            paid_unpaid: 'Relieved',
+            salary_deduction_applicable: false,
+            deduction_reason: 'After relieving date',
             sunday_sandwich: false,
             permission_status: 'None',
             permission_from: '-',
@@ -1509,8 +1566,8 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
 
       // Compute Summaries
       for (const day of empData.days) {
-        if (day.attendance_status === 'Not Joined') {
-          // Before the employee's joining date — excluded entirely, not payable and not deductible.
+        if (day.attendance_status === 'Not Joined' || day.attendance_status === 'Relieved') {
+          // Before joining / after relieving — excluded entirely, not payable and not deductible.
           continue;
         }
         if (day.salary_deduction_applicable) {
@@ -2173,7 +2230,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
 
     const itemsResult = await payrollClient.query(
       `SELECT pi.*, e.id AS employee_id, e.name AS employee_name, e.email AS employee_email, e.designation AS employee_designation, e.department AS employee_department, e.bank_account AS employee_bank_account, e.pf_number AS employee_pf_number, e.uan_number AS employee_uan_number
-       , e.employee_code AS employee_code, e.ctc AS employee_ctc, e.use_pa_sla AS employee_use_pa_sla, e.pa_sla_balance AS employee_pa_sla_balance, e.joining_date AS employee_joining_date
+       , e.employee_code AS employee_code, e.ctc AS employee_ctc, e.use_pa_sla AS employee_use_pa_sla, e.pa_sla_balance AS employee_pa_sla_balance, e.joining_date AS employee_joining_date, e.relieving_date AS employee_relieving_date
        , ps.status AS payslip_status, ps.hold_reason AS payslip_hold_reason
        FROM payroll_items pi
        JOIN employees e ON e.id = pi.employee_id
@@ -2216,6 +2273,14 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       // unaffected (joiningDateStr will be earlier than every date checked).
       const employeeJoiningDate = (item as any).employee_joining_date;
       const joiningDateStr: string | null = employeeJoiningDate ? toLocalDateStr(employeeJoiningDate) : null;
+
+      // Same idea, mirrored for the other end of employment: if this
+      // employee's relieving date (last working day) falls within the
+      // payroll month, don't count any day after it as a missing
+      // timesheet/punch day — they'd already left. Employees who are still
+      // active (no relieving date) are unaffected.
+      const employeeRelievingDate = (item as any).employee_relieving_date;
+      const relievingDateStr: string | null = employeeRelievingDate ? toLocalDateStr(employeeRelievingDate) : null;
 
       // Use stored excluded/holiday dates if already saved (for current payrolls)
       const storedExcludedDates: string[] = (item.timesheet_excluded_dates as any) || [];
@@ -2416,6 +2481,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
                 if (dt.getDay() === 0) continue;
                 if (holidaySet.has(dstr)) continue;
                 if (joiningDateStr && dstr < joiningDateStr) continue; // not employed yet
+                if (relievingDateStr && dstr > relievingDateStr) continue; // already relieved
                 if (!workedDatesSet.has(dstr)) missingDates.push(dstr);
               }
               console.log(`[ANALYSIS] ✅ Found ${tsRes.rows.length} worked days for ${item.employee_name}, missing ${missingDates.length}`);
@@ -2434,6 +2500,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
                 if (dt.getDay() === 0) continue;
                 if (holidaySet.has(dstr)) continue;
                 if (joiningDateStr && dstr < joiningDateStr) continue; // not employed yet
+                if (relievingDateStr && dstr > relievingDateStr) continue; // already relieved
                 missingDates.push(dstr);
               }
               tsData = {
@@ -2576,6 +2643,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
             if (dt.getDay() === 0) continue; // Skip Sunday
             if (holidaySet.has(dstr)) continue; // Skip holidays
             if (joiningDateStr && dstr < joiningDateStr) continue; // Not employed yet
+            if (relievingDateStr && dstr > relievingDateStr) continue; // Already relieved
             if (fullyPunchedDatesSet.has(dstr)) continue; // Has full punch, skip
 
             // This day has NO full punch (either no punch or incomplete punch)
@@ -2617,6 +2685,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
             if (dt.getDay() === 0) { // Sunday
               const sunStr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
               if (joiningDateStr && sunStr < joiningDateStr) continue; // Not employed yet — never sandwich-deduct a pre-joining Sunday
+              if (relievingDateStr && sunStr > relievingDateStr) continue; // Already relieved — never sandwich-deduct a post-relieving Sunday
               const satStr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d - 1).padStart(2, '0')}`;
               const monStr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d + 1).padStart(2, '0')}`;
 
@@ -2645,21 +2714,39 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       const sundayEarnings = Math.round(((monthlySalary || 0) / (calendarDays || 30)) * (Number(item.sunday_work_days) || 0) * 100) / 100;
       const hourlyDeductionStored = Number(item.hourly_deduction) || 0;
 
-      // Mid-month joiner: shrink the base salary to only the days the employee
-      // was actually employed this month (joining date → month end), the same
-      // way the original generation step does. Without this, an employee who
-      // joined partway through the month would have every attendance/leave
+      // Mid-month joiner/leaver: shrink the base salary to only the days the
+      // employee was actually employed this month (joining date → relieving
+      // date, or month end if still active), the same way the original
+      // generation step does. Without this, an employee who joined or was
+      // relieved partway through the month would have every attendance/leave
       // deduction correctly limited to their eligible days, but the base pay
       // itself would still be the FULL month's salary — wildly overstating
       // their net salary on this live-recomputed analysis view.
       const eligibleDaysForPay = (() => {
-        if (!joiningDateStr) return calendarDays;
-        const parts = joiningDateStr.split('-').map(Number);
-        if (parts.length !== 3 || parts.some((n) => isNaN(n))) return calendarDays;
-        const [jy, jm, jd] = parts;
-        if (jy < payroll.year || (jy === payroll.year && jm < payroll.month)) return calendarDays; // joined before this month
-        if (jy > payroll.year || (jy === payroll.year && jm > payroll.month)) return 0; // joins in a future month
-        return Math.max(0, calendarDays - jd + 1); // joined during this month
+        let startDay = 1;
+        let endDay = calendarDays;
+
+        if (joiningDateStr) {
+          const parts = joiningDateStr.split('-').map(Number);
+          if (parts.length === 3 && !parts.some((n) => isNaN(n))) {
+            const [jy, jm, jd] = parts;
+            if (jy > payroll.year || (jy === payroll.year && jm > payroll.month)) return 0; // joins in a future month
+            if (jy === payroll.year && jm === payroll.month) startDay = jd; // joined during this month
+            // else: joined before this month — startDay stays 1
+          }
+        }
+
+        if (relievingDateStr) {
+          const parts = relievingDateStr.split('-').map(Number);
+          if (parts.length === 3 && !parts.some((n) => isNaN(n))) {
+            const [ry, rm, rd] = parts;
+            if (ry < payroll.year || (ry === payroll.year && rm < payroll.month)) return 0; // relieved before this month
+            if (ry === payroll.year && rm === payroll.month) endDay = rd; // relieved during this month
+            // else: relieved after this month — endDay stays calendarDays
+          }
+        }
+
+        return Math.max(0, endDay - startDay + 1);
       })();
       const baseSalaryForPay = ((monthlySalary || 0) / (calendarDays || 30)) * eligibleDaysForPay;
 
@@ -2682,6 +2769,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
           employee_code: (item as any).employee_code,
           ctc: (item as any).employee_ctc,
           joining_date: joiningDateStr,
+          relieving_date: relievingDateStr,
         },
         unpaid_leaves: leaveData?.unpaid_leaves ?? item.unpaid_leaves,
         total_leaves: (leaveData as any)?.total_leaves ?? item.unpaid_leaves,
