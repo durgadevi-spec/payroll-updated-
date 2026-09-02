@@ -547,6 +547,18 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                       const calDays = emp.days?.length || 30;
                       const perDay = calDays > 0 ? monthlySalary / calDays : 0;
 
+                      // Days actually employed this month — excludes days before joining_date
+                      // and days after relieving_date (both flagged upstream by the preview
+                      // API as attendance_status 'Not Joined' / 'Relieved'). Without this, a
+                      // mid-month joiner or leaver would still show the FULL month's salary
+                      // here even though their base pay should only cover the days they
+                      // actually worked.
+                      const eligibleDays = emp.days?.filter(
+                        (d: any) => d.attendance_status !== 'Not Joined' && d.attendance_status !== 'Relieved'
+                      ).length ?? calDays;
+                      const baseSalary = Math.round(perDay * eligibleDays);
+                      const isProrated = eligibleDays < calDays;
+
                       const totalUnpaid = emp.summary.unpaidDays || 0;
                       const punchMissingDays = emp.summary.punchMissing || 0;
                       const sundayDeductions = emp.summary.sundayDeductions || 0;
@@ -560,7 +572,7 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                       const permDeduction = 0; // superseded by precise hourly deduction below (kept at 0 to avoid double count)
                       const hourlyDeductionAmount = Math.round(emp.summary.hourlyDeductionAmount || 0);
                       const totalDeductions = leaveDeduction + punchDeduction + permDeduction + hourlyDeductionAmount;
-                      const netSalary = Math.max(0, monthlySalary - totalDeductions);
+                      const netSalary = Math.max(0, baseSalary - totalDeductions);
                       const fmt = (n: number) => '₹' + n.toLocaleString('en-IN');
                       return (
                         <div className="mx-4 mt-5 mb-4 rounded-lg border border-slate-200 dark:border-slate-700">
@@ -570,8 +582,11 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                           </div>
                           <div className="grid grid-cols-2 sm:grid-cols-5">
                             <div className="px-4 py-3 border-r border-b sm:border-b-0 border-slate-100 dark:border-slate-800">
-                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Monthly salary</p>
-                              <p className="text-sm font-semibold text-slate-900 dark:text-white tabular-nums">{fmt(monthlySalary)}</p>
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">{isProrated ? 'Prorated salary' : 'Monthly salary'}</p>
+                              <p className="text-sm font-semibold text-slate-900 dark:text-white tabular-nums">{fmt(baseSalary)}</p>
+                              {isProrated && (
+                                <p className="text-[11px] text-slate-400 mt-0.5">{eligibleDays}/{calDays} days</p>
+                              )}
                             </div>
                             <div className="px-4 py-3 border-b sm:border-b-0 sm:border-r border-slate-100 dark:border-slate-800">
                               <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Leave deduction</p>
