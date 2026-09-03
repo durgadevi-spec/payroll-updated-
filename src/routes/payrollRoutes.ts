@@ -2720,6 +2720,11 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
           }
 
           // Sandwich Deduction: if Saturday and Monday have NO punches, deduct Sunday
+          // NOTE: A Saturday/Monday covered by approved leave or OD (leaveDateSet — which
+          // already includes OD dates, see uniqueAllLeaveDates above) is NOT an unpaid
+          // absence, so it must never trigger the Sunday sandwich deduction — this mirrors
+          // the main day-by-day generation logic, which only sandwich-deducts Sunday when
+          // both Saturday AND Monday are confirmed salary-deductible unpaid absence days.
           for (let d = 2; d <= calendarDays - 1; d++) {
             const dt = new Date(payroll.year, payroll.month - 1, d);
             if (dt.getDay() === 0) { // Sunday
@@ -2728,6 +2733,8 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
               if (relievingDateStr && sunStr > relievingDateStr) continue; // Already relieved — never sandwich-deduct a post-relieving Sunday
               const satStr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d - 1).padStart(2, '0')}`;
               const monStr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d + 1).padStart(2, '0')}`;
+
+              if (leaveDateSet.has(satStr) || leaveDateSet.has(monStr)) continue; // Sat or Mon covered by approved leave/OD — not an unpaid absence, skip
 
               const satNoPunch = !fullyPunchedDatesSet.has(satStr) && !incompletePunchedDatesSet.has(satStr);
               const monNoPunch = !fullyPunchedDatesSet.has(monStr) && !incompletePunchedDatesSet.has(monStr);
