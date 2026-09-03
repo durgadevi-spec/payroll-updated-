@@ -1,8 +1,7 @@
 import { useState, useRef } from 'react';
-import { Plus, Trash2, Save, X, Eye, Upload, Layout, Image as ImageIcon } from 'lucide-react';
+import { Plus, Trash2, Save, X, Eye, Upload, Layout } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
-import { Card } from '../ui/Card';
 import { PayslipTemplateContent } from '../../types/payslip';
 import { DEFAULT_PAYSLIP_TEMPLATE } from '../../lib/defaultTemplate';
 import { supabase } from '../../lib/supabase';
@@ -24,8 +23,6 @@ export function PayslipTemplateEditor({ initialTemplate, onSave, onClose }: Prop
   const [saving, setSaving] = useState(false);
   const [activeTab, setActiveTab] = useState<'header' | 'earnings' | 'deductions' | 'footer' | 'visual'>('header');
   const [selectedField, setSelectedField] = useState<string | null>(null);
-  const [isVisualMode, setIsVisualMode] = useState(initialTemplate?.content?.type === 'visual');
-
   const logoInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
 
@@ -358,7 +355,7 @@ export function PayslipTemplateEditor({ initialTemplate, onSave, onClose }: Prop
                   <h3 className="text-sm font-semibold">{activeTab.toUpperCase()} Rows</h3>
                   <Button size="sm" variant="outline" onClick={() => addRow(activeTab)} icon={<Plus size={14} />}>Add Row</Button>
                 </div>
-                {content.sections[activeTab].rows.map((row, index) => (
+                {content.sections[activeTab].rows.map((row: { label: string; key: string; isTotal?: boolean }, index: number) => (
                   <div key={index} className="flex items-center gap-2">
                     <Input
                       value={row.label}

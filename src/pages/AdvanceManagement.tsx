@@ -19,7 +19,8 @@ import {
   History,
   Ban,
   Paperclip,
-  Download
+  Download,
+  XCircle
 } from 'lucide-react';
 import { format, addMonths } from 'date-fns';
 import { useAuth } from '../context/AuthContext';
@@ -123,6 +124,11 @@ export function AdvanceManagement() {
   const [reconcileNotes, setReconcileNotes] = useState('');
   const [reconcileSubmitting, setReconcileSubmitting] = useState(false);
   const [reconcileError, setReconcileError] = useState('');
+
+  const [closingAdv, setClosingAdv] = useState<any | null>(null);
+  const [closeReason, setCloseReason] = useState('');
+  const [closeSubmitting, setCloseSubmitting] = useState(false);
+  const [closeError, setCloseError] = useState('');
 
   useEffect(() => {
     if (detailsAdv && detailsAdv.settlement_type === 'Reconciliation') {
@@ -236,6 +242,36 @@ export function AdvanceManagement() {
       }
     } catch (e) { console.error(e); }
     setReconcileSubmitting(false);
+  }
+
+  function openCloseModal(adv: any) {
+    setClosingAdv(adv);
+    setCloseReason('');
+    setCloseError('');
+  }
+
+  async function handleCloseConfirm() {
+    if (!closingAdv) return;
+    if (!closeReason.trim()) { setCloseError('A reason is required to close this advance'); return; }
+    setCloseSubmitting(true);
+    setCloseError('');
+    try {
+      const res = await fetch(`/api/advances/${closingAdv.id}/manual-close`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ closed_by: currentUserEmail, reason: closeReason.trim() })
+      });
+      if (res.ok) {
+        setClosingAdv(null);
+        setCloseReason('');
+        if (detailsAdv?.id === closingAdv.id) setDetailsAdv(null);
+        fetchAdvances();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setCloseError(err.error || 'Failed to close advance');
+      }
+    } catch (e) { console.error(e); setCloseError('Failed to close advance'); }
+    setCloseSubmitting(false);
   }
 
   useEffect(() => {
@@ -751,6 +787,11 @@ export function AdvanceManagement() {
                           <button onClick={() => handleDeleteClick(adv.id)} title="Delete" className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-md transition-colors">
                             <Trash2 size={16} />
                           </button>
+                          {adv.status === 'Active' && adv.settlement_type !== 'Reconciliation' && (
+                            <button onClick={() => openCloseModal(adv)} title="Close / write off" className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-900/20 rounded-md transition-colors">
+                              <XCircle size={16} />
+                            </button>
+                          )}
                         </>
                       )}
                       <button onClick={() => setDetailsAdv(adv)} title="View details" className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-md transition-colors">
@@ -1213,6 +1254,41 @@ export function AdvanceManagement() {
         </div>
       )}
 
+      {/* Manual Close / Write-off Modal */}
+      {closingAdv && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 rounded-xl shadow-xl w-full max-w-md overflow-hidden border border-slate-200 dark:border-slate-700">
+            <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800">
+              <h2 className="text-lg font-bold text-slate-800 dark:text-white">Close Advance</h2>
+            </div>
+            <div className="p-6 space-y-4 text-sm">
+              <div className="flex justify-between"><span className="text-slate-500">Employee</span><span className="font-medium text-slate-900 dark:text-white">{closingAdv.employee_name}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Remaining Balance</span><span className="font-medium text-red-600 dark:text-red-400">₹{Number(closingAdv.balance).toLocaleString()}</span></div>
+              <div className="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2">
+                This marks the advance Closed and writes off the remaining balance — it will no longer be deducted from any future payroll. This can't be undone from here.
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Reason (required)</label>
+                <textarea
+                  rows={3}
+                  value={closeReason}
+                  onChange={e => setCloseReason(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-blue-500"
+                  placeholder="e.g. Fully recovered outside payroll, employee exited, balance waived..."
+                />
+              </div>
+              {closeError && <p className="text-xs text-red-600 dark:text-red-400">{closeError}</p>}
+            </div>
+            <div className="px-6 py-4 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 flex justify-end gap-3">
+              <button onClick={() => { setClosingAdv(null); setCloseReason(''); setCloseError(''); }} className="px-4 py-2 text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors">Cancel</button>
+              <button onClick={handleCloseConfirm} disabled={closeSubmitting} className="px-4 py-2 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50 rounded-lg transition-colors">
+                {closeSubmitting ? 'Closing...' : 'Close Advance'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Details / Timeline Drawer */}
       {detailsAdv && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
@@ -1299,6 +1375,23 @@ export function AdvanceManagement() {
                       </tbody>
                     </table>
                   </div>
+
+                  {detailsAdv.status === 'Active' && (
+                    <button
+                      onClick={() => openCloseModal(detailsAdv)}
+                      className="w-full mt-3 py-2 text-sm font-medium text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/30 rounded-lg transition-colors"
+                    >
+                      Close Advance (Write Off Balance)
+                    </button>
+                  )}
+
+                  {detailsAdv.status === 'Closed' && detailsAdv.shortfall_action === 'Written Off' && (
+                    <div className="mt-3 text-sm border border-amber-200 dark:border-amber-800 rounded-lg divide-y divide-amber-200 dark:divide-amber-800 bg-amber-50/50 dark:bg-amber-900/10">
+                      <div className="flex justify-between px-4 py-2.5"><span className="text-slate-500">Closed As</span><span className="font-medium text-amber-700 dark:text-amber-400">Written Off (Manual)</span></div>
+                      {detailsAdv.shortfall_notes && <div className="flex justify-between px-4 py-2.5"><span className="text-slate-500">Reason</span><span className="font-medium text-slate-800 dark:text-slate-200 text-right">{detailsAdv.shortfall_notes}</span></div>}
+                      {detailsAdv.closed_at && <div className="flex justify-between px-4 py-2.5"><span className="text-slate-500">Closed</span><span className="font-medium text-slate-800 dark:text-slate-200">{format(new Date(detailsAdv.closed_at), 'MMM dd, yyyy')}{detailsAdv.closed_by ? ` by ${detailsAdv.closed_by}` : ''}</span></div>}
+                    </div>
+                  )}
                 </div>
               )}
 

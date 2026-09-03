@@ -101,6 +101,30 @@ export interface Payslip {
   payroll_item?: PayrollItem;
 }
 
+export interface PayslipFull {
+  id: string;
+  payroll_id: string;
+  employee_id: string;
+  status: string;
+  email_sent: boolean;
+  email_sent_at: string | null;
+  created_at: string;
+  employee: Pick<Employee, 'id' | 'name' | 'email' | 'designation' | 'department' | 'bank_account' | 'pf_number' | 'uan_number'>;
+  payroll: {
+    id: string;
+    month: number;
+    year: number;
+    status: string;
+  };
+  payroll_item: Pick<PayrollItem, 'id' | 'employee_id' | 'monthly_salary' | 'leave_deduction' | 'timesheet_deduction' | 'pf_deduction' | 'esi_deduction' | 'tax_deduction' | 'loan_deduction' | 'bonus' | 'net_salary' | 'working_days' | 'unpaid_leaves'> & {
+    advance_deduction?: number;
+    sunday_work_days?: number;
+    previous_month_balance?: number;
+    calculation_type?: PayrollItem['calculation_type'];
+    calculation_days?: number;
+  };
+}
+
 export interface Leave {
   id: string;
   employee_id: string;

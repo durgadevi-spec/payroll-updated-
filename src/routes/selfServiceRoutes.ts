@@ -165,7 +165,7 @@ selfServiceRouter.get('/me/payslips', async (req: AuthenticatedRequest, res: Res
       ORDER BY ps.created_at DESC
     `, [employeeId]);
     
-    const mapped = result.rows.map(r => ({
+    const mapped = result.rows.map((r: Record<string, any>) => ({
       id: r.id,
       payroll_id: r.payroll_id,
       employee_id: r.employee_id,

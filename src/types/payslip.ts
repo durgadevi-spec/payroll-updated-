@@ -21,6 +21,12 @@ export interface VisualField {
   label?: string; // Optional static text
 }
 
+export interface PayslipTemplateRow {
+  label: string;
+  key: string;
+  isTotal?: boolean;
+}
+
 export interface PayslipTemplateContent {
   type?: TemplateType;
   visualConfig?: {
@@ -42,11 +48,11 @@ export interface PayslipTemplateContent {
     };
     earnings: {
       title: string;
-      rows: { label: string; key: string }[];
+      rows: PayslipTemplateRow[];
     };
     deductions: {
       title: string;
-      rows: { label: string; key: string; isTotal?: boolean }[];
+      rows: PayslipTemplateRow[];
     };
     summary: {
       title: string;

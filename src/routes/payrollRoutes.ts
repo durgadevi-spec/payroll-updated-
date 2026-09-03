@@ -3688,6 +3688,60 @@ router.post('/advances/:id/reconcile', async (req, res) => {
   }
 });
 
+// Manual close / write-off for a Payroll-type advance that's stuck Active
+// (e.g. an old advance whose payroll was never marked paid, or a balance the
+// company has decided to waive). Reconciliation-type advances have their own
+// dedicated close flow (/reconcile) and are not allowed through this route.
+router.post('/advances/:id/manual-close', async (req, res) => {
+  const { id } = req.params;
+  const { closed_by, reason } = req.body;
+
+  if (!reason || !reason.trim()) {
+    return res.status(400).json({ error: 'A reason is required to manually close an advance' });
+  }
+
+  let client;
+  try {
+    client = await payrollPool.connect();
+    const currentRes = await client.query('SELECT * FROM advances WHERE id = $1', [id]);
+    if (currentRes.rows.length === 0) return res.status(404).json({ error: 'Advance not found' });
+    const current = currentRes.rows[0];
+
+    if (current.status !== 'Active') {
+      return res.status(400).json({ error: 'Only an Active advance can be manually closed' });
+    }
+    if (current.settlement_type === 'Reconciliation') {
+      return res.status(400).json({ error: 'Reconciliation advances are closed via Reconcile & Close, not this action' });
+    }
+
+    const writtenOffAmount = Number(current.balance) || 0;
+
+    const result = await client.query(`
+      UPDATE advances
+      SET status = 'Closed',
+          balance = 0,
+          shortfall_action = 'Written Off',
+          shortfall_notes = $1,
+          closed_at = NOW(),
+          closed_by = $2
+      WHERE id = $3
+      RETURNING id, employee_id, amount, balance, status, shortfall_action, shortfall_notes, closed_at, closed_by
+    `, [reason.trim(), closed_by || 'admin@company.com', id]);
+
+    await client.query(
+      `INSERT INTO audit_logs (action, entity, entity_id, details, user_email) VALUES ($1,$2,$3,$4,$5)`,
+      ['ADVANCE_MANUALLY_CLOSED', 'advances', id, JSON.stringify({ employee_id: current.employee_id, writtenOffAmount, reason: reason.trim() }), closed_by || 'admin@company.com']
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error manually closing advance:', err);
+    res.status(500).json({ error: 'Failed to manually close advance' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
 router.post('/advances', async (req, res) => {
   const {
     employee_id, amount, date, reason, repayment_type, installment_amount, remarks,

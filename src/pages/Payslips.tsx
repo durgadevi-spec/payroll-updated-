@@ -12,33 +12,7 @@ import { TableSkeleton } from '../components/ui/Skeleton';
 import { PayslipTemplateEditor } from '../components/payslips/PayslipTemplateEditor';
 import { PayslipDocument } from '../components/payslips/PayslipDocument';
 import { PayslipTemplate } from '../types/payslip';
-
-export interface PayslipFull {
-  id: string;
-  payroll_id: string;
-  employee_id: string;
-  status: string;
-  email_sent: boolean;
-  email_sent_at: string | null;
-  created_at: string;
-  employee: { id: string; name: string; email: string; designation: string; department: string; bank_account: string; pf_number: string; uan_number: string };
-  payroll: { id: string; month: number; year: number; status: string };
-  payroll_item: {
-    monthly_salary: number;
-    leave_deduction: number;
-    timesheet_deduction: number;
-    pf_deduction: number;
-    esi_deduction: number;
-    tax_deduction: number;
-    loan_deduction: number;
-    advance_deduction?: number;
-    sunday_work_days?: number;
-    bonus: number;
-    net_salary: number;
-    working_days: number;
-    unpaid_leaves: number
-  };
-}
+import { PayslipFull } from '../types';
 
 export function Payslips() {
   const { showToast } = useToast();

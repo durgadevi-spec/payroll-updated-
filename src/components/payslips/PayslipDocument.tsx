@@ -1,5 +1,5 @@
-import React from 'react';
-import { PayslipFull, PayslipTemplateContent } from '../../types';
+import { PayslipFull } from '../../types';
+import { PayslipTemplateContent, VisualField } from '../../types/payslip';
 import { formatCurrency, getMonthName } from '../../lib/payrollCalculator';
 import { numberToWords } from '../../lib/numberToWords';
 import { Plus, Trash2 } from 'lucide-react';
@@ -14,7 +14,13 @@ interface Props {
   onAddRow?: (section: 'earnings' | 'deductions') => void;
 }
 
-export function PayslipDocument({ payslip, templateContent, editable, onUpdateValue, onUpdateLabel, onRemoveRow, onAddRow }: Props) {
+interface PayslipRow {
+  label: string;
+  value: number;
+  key?: string;
+}
+
+export function PayslipDocument({ payslip, templateContent, editable, onUpdateLabel, onRemoveRow, onAddRow }: Props) {
   const item = payslip.payroll_item;
   const emp = payslip.employee;
   const pal = payslip.payroll;
@@ -32,9 +38,9 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
   const sundayEarnings = Math.round(perDaySalary * (item.sunday_work_days || 0) * 100) / 100;
 
   // Map values to labels based on template rows if available
-  const earnings = templateContent?.sections.earnings.rows.map(row => {
+  const earnings: PayslipRow[] = templateContent?.sections.earnings.rows.map(row => {
     let value = 0;
-    if (row.key === 'monthly_salary' || row.key === 'basic_salary') value = item.monthly_salary;
+    if (row.key === 'monthly_salary' || row.key === 'basic_salary') value = item.monthly_salary || 0;
     else if (row.key === 'sunday_work_earnings') value = sundayEarnings;
     else if (row.key === 'bonus') value = item.bonus || 0;
     else if (row.key === 'previous_month_balance') value = (item as any).previous_month_balance || 0;
@@ -43,7 +49,7 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
     else if (row.key === 'medical') value = 0;
     return { label: row.label, value, key: row.key === 'sunday_work_earnings' ? undefined : (row.key === 'basic_salary' ? 'monthly_salary' : row.key) };
   }) || [
-    { label: 'Monthly Salary', value: item.monthly_salary, key: 'monthly_salary' },
+    { label: 'Monthly Salary', value: item.monthly_salary || 0, key: 'monthly_salary' },
     { label: 'Sunday Work Earnings', value: sundayEarnings },
     { label: 'Special Allowance', value: item.bonus || 0, key: 'bonus' },
   ];
@@ -58,21 +64,21 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
     earnings.push({ label: 'Previous Month Balance', value: (item as any).previous_month_balance || 0, key: 'previous_month_balance' });
   }
 
-  const deductions = templateContent?.sections.deductions.rows.map(row => {
+  const deductions: PayslipRow[] = templateContent?.sections.deductions.rows.map(row => {
     let value = 0;
     if (row.key === 'lop') value = item.leave_deduction + item.timesheet_deduction;
     else if (row.key === 'pf') value = item.pf_deduction;
     else if (row.key === 'esi') value = item.esi_deduction;
     else if (row.key === 'tax') value = item.tax_deduction;
     else if (row.key === 'loan') value = item.loan_deduction;
-    else if (row.key === 'advance') value = item.advance_deduction;
+    else if (row.key === 'advance') value = item.advance_deduction || 0;
     return { label: row.label, value, key: row.key };
   }) || [
-    { label: 'LOP', value: item.leave_deduction + item.timesheet_deduction, key: 'lop' },
-    { label: 'PF', value: item.pf_deduction, key: 'pf' },
-    { label: 'ESI', value: item.esi_deduction, key: 'esi' },
-    { label: 'TDS/Tax', value: item.tax_deduction, key: 'tax' },
-    { label: 'Advance', value: item.advance_deduction, key: 'advance' },
+    { label: 'LOP', value: (item.leave_deduction || 0) + (item.timesheet_deduction || 0), key: 'lop' },
+    { label: 'PF', value: item.pf_deduction || 0, key: 'pf' },
+    { label: 'ESI', value: item.esi_deduction || 0, key: 'esi' },
+    { label: 'TDS/Tax', value: item.tax_deduction || 0, key: 'tax' },
+    { label: 'Advance', value: item.advance_deduction || 0, key: 'advance' },
   ];
 
   if (templateContent?.type === 'visual' && templateContent.visualConfig?.backgroundImage) {
@@ -87,7 +93,7 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
           backgroundRepeat: 'no-repeat'
         }}
       >
-        {templateContent.visualConfig.fields.map(field => {
+        {templateContent.visualConfig.fields.map((field: VisualField) => {
           let displayValue = '';
           switch(field.key) {
             case 'employee_name': displayValue = emp.name; break;
@@ -98,7 +104,7 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
             case 'basic_salary': displayValue = formatCurrency(item.monthly_salary); break;
             case 'previous_month_balance': displayValue = formatCurrency((item as any).previous_month_balance || 0); break;
             case 'total_earnings': displayValue = formatCurrency(item.net_salary + item.pf_deduction + item.esi_deduction + item.tax_deduction); break;
-            case 'total_deductions': displayValue = formatCurrency(item.pf_deduction + item.esi_deduction + item.tax_deduction + item.advance_deduction); break;
+            case 'total_deductions': displayValue = formatCurrency(item.pf_deduction + item.esi_deduction + item.tax_deduction + (item.advance_deduction || 0)); break;
             default: displayValue = field.name;
           }
           return (

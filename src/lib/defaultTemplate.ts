@@ -65,7 +65,11 @@ export const DEFAULT_PAYSLIP_TEMPLATE: PayslipTemplateContent = {
 
 export const DEFAULT_PAYSLIP = {
   id: 'preview-id',
+  payroll_id: 'payroll-preview-id',
   employee_id: 'EMP12345',
+  status: 'generated',
+  email_sent_at: null,
+  created_at: '2026-08-31T00:00:00.000Z',
   employee_name: 'John Doe',
   month: 8,
   year: 2026,
@@ -74,26 +78,33 @@ export const DEFAULT_PAYSLIP = {
   employee: {
     id: 'EMP12345',
     name: 'John Doe',
+    email: 'john.doe@example.com',
     designation: 'Senior Designer',
     department: 'Creative',
-    bank_account: 'XXXXXXXXXXXX1234'
+    bank_account: 'XXXXXXXXXXXX1234',
+    pf_number: '',
+    uan_number: ''
   },
   payroll: {
+    id: 'payroll-preview-id',
     month: 8,
-    year: 2026
+    year: 2026,
+    status: 'completed'
   },
   payroll_item: {
     id: 'item-id',
     employee_id: 'EMP12345',
     working_days: 26,
-    basic_salary: 45000,
+    monthly_salary: 45000,
     bonus: 5000,
     leave_deduction: 0,
+    timesheet_deduction: 0,
     pf_deduction: 1800,
     esi_deduction: 337,
     tax_deduction: 0,
     advance_deduction: 0,
     loan_deduction: 0,
+    unpaid_leaves: 0,
     net_salary: 47863
   }
 };
