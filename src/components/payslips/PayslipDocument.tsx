@@ -37,6 +37,7 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
     if (row.key === 'monthly_salary' || row.key === 'basic_salary') value = item.monthly_salary;
     else if (row.key === 'sunday_work_earnings') value = sundayEarnings;
     else if (row.key === 'bonus') value = item.bonus || 0;
+    else if (row.key === 'previous_month_balance') value = (item as any).previous_month_balance || 0;
     else if (row.key === 'hra') value = 0;
     else if (row.key === 'conveyance') value = 0;
     else if (row.key === 'medical') value = 0;
@@ -46,6 +47,16 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
     { label: 'Sunday Work Earnings', value: sundayEarnings },
     { label: 'Special Allowance', value: item.bonus || 0, key: 'bonus' },
   ];
+
+  // Previous Month Balance is a manual, per-employee, per-month carry-forward
+  // amount, so it won't exist as a row on templates saved before this feature
+  // existed. Always surface it as its own earnings line whenever it's
+  // non-zero, in addition to whatever the template already defines, so it's
+  // never silently missing from a payslip that actually has a balance.
+  const hasPreviousMonthBalanceRow = earnings.some((e: { key?: string }) => e.key === 'previous_month_balance');
+  if (!hasPreviousMonthBalanceRow && ((item as any).previous_month_balance || 0) > 0) {
+    earnings.push({ label: 'Previous Month Balance', value: (item as any).previous_month_balance || 0, key: 'previous_month_balance' });
+  }
 
   const deductions = templateContent?.sections.deductions.rows.map(row => {
     let value = 0;
@@ -85,6 +96,7 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
             case 'month_year': displayValue = `${getMonthName(pal?.month || 1)} ${pal?.year || 2026}`; break;
             case 'monthly_salary':
             case 'basic_salary': displayValue = formatCurrency(item.monthly_salary); break;
+            case 'previous_month_balance': displayValue = formatCurrency((item as any).previous_month_balance || 0); break;
             case 'total_earnings': displayValue = formatCurrency(item.net_salary + item.pf_deduction + item.esi_deduction + item.tax_deduction); break;
             case 'total_deductions': displayValue = formatCurrency(item.pf_deduction + item.esi_deduction + item.tax_deduction + item.advance_deduction); break;
             default: displayValue = field.name;

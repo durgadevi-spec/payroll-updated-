@@ -156,7 +156,7 @@ selfServiceRouter.get('/me/payslips', async (req: AuthenticatedRequest, res: Res
       SELECT ps.*, 
              e.id as emp_id, e.name as emp_name, e.email as emp_email, e.designation, e.department, e.bank_account, e.pf_number, e.uan_number,
              p.id as pr_id, p.month, p.year, p.status as pr_status,
-             pi.monthly_salary, pi.leave_deduction, pi.timesheet_deduction, pi.pf_deduction, pi.esi_deduction, pi.tax_deduction, pi.loan_deduction, pi.advance_deduction, pi.sunday_work_days, pi.bonus, pi.net_salary, pi.working_days, pi.unpaid_leaves
+             pi.monthly_salary, pi.leave_deduction, pi.timesheet_deduction, pi.pf_deduction, pi.esi_deduction, pi.tax_deduction, pi.loan_deduction, pi.advance_deduction, pi.sunday_work_days, pi.bonus, pi.previous_month_balance, pi.net_salary, pi.working_days, pi.unpaid_leaves
       FROM payslips ps
       JOIN employees e ON ps.employee_id = e.id
       JOIN payrolls p ON ps.payroll_id = p.id
@@ -178,7 +178,7 @@ selfServiceRouter.get('/me/payslips', async (req: AuthenticatedRequest, res: Res
       payroll_item: {
         monthly_salary: r.monthly_salary, leave_deduction: r.leave_deduction, timesheet_deduction: r.timesheet_deduction,
         pf_deduction: r.pf_deduction, esi_deduction: r.esi_deduction, tax_deduction: r.tax_deduction, loan_deduction: r.loan_deduction,
-        advance_deduction: r.advance_deduction, sunday_work_days: r.sunday_work_days, bonus: r.bonus, net_salary: r.net_salary,
+        advance_deduction: r.advance_deduction, sunday_work_days: r.sunday_work_days, bonus: r.bonus, previous_month_balance: r.previous_month_balance, net_salary: r.net_salary,
         working_days: r.working_days, unpaid_leaves: r.unpaid_leaves
       }
     }));

@@ -216,6 +216,7 @@ const getNetSalary = (item: PayrollItemWithEmployee, month?: number, year?: numb
   const sandwichDeduction = safeNumber((item as any).sandwich_deduction_amount, 0);
   const hourlyDeduction = safeNumber((item as any).hourly_deduction, 0);
   const bonus = safeNumber(item.bonus, 0);
+  const previousMonthBalance = safeNumber((item as any).previous_month_balance, 0);
 
   // Calculate correct base salary for pay (prorated for mid-month joiner / custom days)
   const calendarDays = (month && year) ? new Date(year, month, 0).getDate() : 30;
@@ -239,7 +240,7 @@ const getNetSalary = (item: PayrollItemWithEmployee, month?: number, year?: numb
 
   const sundayEarnings = perDaySalary * safeNumber(item.sunday_work_days, 0);
 
-  return Math.max(0, Math.round((baseSalary - leaveDeduction - tsDeduction - mpDeduction - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction - permissionDeduction - sandwichDeduction - hourlyDeduction + bonus + sundayEarnings) * 100) / 100);
+  return Math.max(0, Math.round((baseSalary - leaveDeduction - tsDeduction - mpDeduction - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction - permissionDeduction - sandwichDeduction - hourlyDeduction + bonus + previousMonthBalance + sundayEarnings) * 100) / 100);
 };
 
 export function Payroll() {
@@ -274,6 +275,7 @@ export function Payroll() {
   const [editingItem, setEditingItem] = useState<(PayrollItemWithEmployee & { leave_source?: string; timesheet_status?: string; timesheet_submitted_at?: string | null }) | null>(null);
   const [sundayInput, setSundayInput] = useState('0');
   const [bonusInput, setBonusInput] = useState('0');
+  const [previousMonthBalanceInput, setPreviousMonthBalanceInput] = useState('0');
   const [calculationType, setCalculationType] = useState<'monthly' | 'custom' | 'working_days'>('monthly');
   const [customDaysInput, setCustomDaysInput] = useState('30');
   const [showRegenReasonModal, setShowRegenReasonModal] = useState(false);
@@ -398,7 +400,8 @@ export function Payroll() {
         body: JSON.stringify({
           // advance_deduction is NOT sent — it's auto-managed from Advance Management
           sunday_work_days: parseFloat(sundayInput) || 0,
-          bonus: parseFloat(bonusInput) || 0
+          bonus: parseFloat(bonusInput) || 0,
+          previous_month_balance: parseFloat(previousMonthBalanceInput) || 0
         })
       });
 
@@ -825,6 +828,7 @@ export function Payroll() {
         'ESI Deduction',
         'Tax Deduction',
         'Bonus',
+        'Previous Month Balance',
         'Net Salary'
       ];
 
@@ -861,6 +865,7 @@ export function Payroll() {
         (item.esi_deduction || 0),
         (item.tax_deduction || 0),
         (item.bonus || 0),
+        (item.previous_month_balance || 0),
         (item.net_salary || 0)
       ] as any[]);
 
@@ -1063,6 +1068,7 @@ export function Payroll() {
                               setEditingItem(item);
                               setSundayInput(String(item.sunday_work_days || 0));
                               setBonusInput(String(item.bonus || 0));
+                              setPreviousMonthBalanceInput(String((item as any).previous_month_balance || 0));
                             }}
                           />
                         </td>
@@ -1163,13 +1169,21 @@ export function Payroll() {
                       </td>
                       <td className="py-2 px-3 text-red-500 font-medium">-{formatCurrency(item.advance_deduction || 0)}</td>
                       <td className="py-2 px-3 text-green-500 font-medium">+{item.sunday_work_days || 0} days</td>
-                      <td className="py-2 px-3 font-semibold text-slate-800 dark:text-white">{formatCurrency(item.net_salary)}</td>
+                      <td className="py-2 px-3 font-semibold text-slate-800 dark:text-white">
+                        {formatCurrency(item.net_salary)}
+                        {(item as any).previous_month_balance > 0 && (
+                          <div className="text-[10px] font-normal text-blue-600 dark:text-blue-400 mt-0.5">
+                            incl. +{formatCurrency((item as any).previous_month_balance)} prev. month balance
+                          </div>
+                        )}
+                      </td>
                       <td className="py-2 px-3">
                         <button
                           onClick={() => {
                             setEditingItem(item);
                             setSundayInput(String(item.sunday_work_days || 0));
                             setBonusInput(String(item.bonus || 0));
+                            setPreviousMonthBalanceInput(String((item as any).previous_month_balance || 0));
                           }}
                           className="p-1 text-blue-600 hover:bg-blue-50 rounded"
                           title="Edit manual adjustments"
@@ -1385,6 +1399,19 @@ export function Payroll() {
                 placeholder="0"
                 min="0"
               />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Previous Month Balance (₹)</label>
+              <input
+                type="number"
+                value={previousMonthBalanceInput}
+                onChange={(e) => setPreviousMonthBalanceInput(e.target.value)}
+                className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="0"
+                min="0"
+              />
+              <p className="text-xs text-slate-400 italic mt-1">Any leftover salary balance owed from last month — added on top of this month's salary and shown separately on the payslip.</p>
             </div>
           </div>
         </div>
@@ -1661,7 +1688,7 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
         <table className="w-full text-xs border-separate border-spacing-0">
           <thead>
             <tr>
-              {['Employee', 'Mode', 'Days', 'Monthly Sal.', 'Leave Taken', 'Leave Ded.', 'Missing TS', 'TS Ded.', 'Missing Punch', 'Punch Ded.', 'Sandwich', 'Sandwich Ded.', 'Permissions', 'Perm. Ded.', 'Hourly Short', 'Hourly Ded.', 'Holidays', 'Advance', 'Sunday', 'PF', 'ESI', 'Tax', 'Bonus', 'Net Salary', 'Status', ''].map((h, i) => (
+              {['Employee', 'Mode', 'Days', 'Monthly Sal.', 'Leave Taken', 'Leave Ded.', 'Missing TS', 'TS Ded.', 'Missing Punch', 'Punch Ded.', 'Sandwich', 'Sandwich Ded.', 'Permissions', 'Perm. Ded.', 'Hourly Short', 'Hourly Ded.', 'Holidays', 'Advance', 'Sunday', 'PF', 'ESI', 'Tax', 'Bonus', 'Prev. Bal.', 'Net Salary', 'Status', ''].map((h, i) => (
                 <th
                   key={h}
                   className={`py-2.5 px-3 text-left font-semibold text-[10.5px] uppercase tracking-wide text-slate-500 dark:text-slate-300 whitespace-nowrap bg-slate-100 dark:bg-slate-800 border-b-2 border-slate-300 dark:border-slate-600 border-r border-slate-200 dark:border-slate-700 sticky top-0 ${i === 0 ? 'left-0 z-20 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.15)]' : 'z-10'
@@ -1866,6 +1893,9 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 text-red-500">-{formatCurrency(item.esi_deduction)}</td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 text-red-500">-{formatCurrency(item.tax_deduction)}</td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 text-emerald-600 dark:text-emerald-400">+{formatCurrency(item.bonus)}</td>
+                    <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 text-blue-600 dark:text-blue-400">
+                      {(item as any).previous_month_balance > 0 ? `+${formatCurrency((item as any).previous_month_balance)}` : '—'}
+                    </td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 font-bold text-slate-800 dark:text-white">{formatCurrency(getNetSalary(item, month, year))}</td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800">
                       {(item as any).payslip_status === 'held' ? (
@@ -2142,6 +2172,9 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
               <div>Hourly Ded.: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency((salarySlipModal as any).hourly_deduction || 0)}</span></div>
 
               <div>Advance Deduction: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency(salarySlipModal.advance_deduction || 0)}</span></div>
+              <div />
+
+              <div>Previous Month Balance: <span className="font-semibold text-blue-600 dark:text-blue-400">+₹{formatCurrency((salarySlipModal as any).previous_month_balance || 0)}</span></div>
               <div />
 
               <div>PF: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency(salarySlipModal.pf_deduction || 0)}</span></div>

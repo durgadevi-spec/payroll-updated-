@@ -56,6 +56,10 @@ export interface PayrollItem {
   loan_deduction: number;
   advance_deduction?: number;
   bonus: number;
+  // Balance amount carried forward/still owed from a previous month's salary
+  // (e.g. salary that was partially paid or held back last month). Added on
+  // top of this month's earnings, shown separately as "Previous Month Balance".
+  previous_month_balance?: number;
   net_salary: number;
   unpaid_leaves: number;
   total_leaves?: number;

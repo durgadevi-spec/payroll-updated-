@@ -1252,6 +1252,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
         ctc: emp.ctc || 0,
         joining_date: emp.joining_date ? formatLocalDate(emp.joining_date) : null,
         relieving_date: emp.relieving_date ? formatLocalDate(emp.relieving_date) : null,
+        is_on_probation: false,
         days: [] as any[],
         summary: {
           totalPayable: 0,
@@ -1283,6 +1284,22 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
       const empAtt = attendance.get(emp.id) || new Map();
       const empPerms = lmsPermissions.get(emp.id) || new Map();
       let paSlaBalance = emp.use_pa_sla ? Number(emp.pa_sla_balance || 0) : 0;
+
+      // Probation check: employees are on probation for their first 6 months
+      // from their joining_date. While on probation they do NOT get the free
+      // monthly 3-hour permission allowance — every permission/short-hour
+      // minute is deductible, even though it would normally be covered.
+      // (PL/SL still works as usual via the "Use PL/SL" checkbox — this only
+      // affects the permission allowance.)
+      const PROBATION_MONTHS = 6;
+      let isOnProbation = false;
+      if (empData.joining_date) {
+        const [jy, jm, jd] = empData.joining_date.split('-').map(Number);
+        const probationEndDate = new Date(jy, (jm - 1) + PROBATION_MONTHS, jd);
+        const payrollPeriodEnd = new Date(year, month - 1, endDate.getDate());
+        isOnProbation = payrollPeriodEnd < probationEndDate;
+      }
+      empData.is_on_probation = isOnProbation;
 
       // First pass: Calculate all days
       for (let d = 1; d <= endDate.getDate(); d++) {
@@ -1440,7 +1457,10 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           if (totalHours > 0 || halfDayHours > 0 || permHours > 0) {
             if (eligibleHours < 9) {
               const shortfall = 9 - eligibleHours;
-              const availableAllowance = 3 - empData.summary.monthlyAllowanceUsed;
+              // Probationary employees get no free monthly permission allowance —
+              // force availableAllowance to 0 so every short hour falls through
+              // to the deductible/hourly-deduction branch below.
+              const availableAllowance = isOnProbation ? 0 : (3 - empData.summary.monthlyAllowanceUsed);
               if (availableAllowance > 0) {
                 const totalCoverage = Math.min(shortfall, availableAllowance);
                 allowanceUsedToday = totalCoverage;
@@ -1483,7 +1503,9 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
                 hourlyDeductionToday = Math.round(remainingShort * perHourSalaryForDed * 100) / 100;
                 paidUnpaid = 'Partially Paid (Hourly Deduction)';
                 isDeductible = false; // day itself is still "attended"; deduction is hour-based, not day-based
-                if (permHoursUsed === 0 && halfDayHours === 0 && allowanceUsedToday === 0) {
+                if (isOnProbation && permHours > 0) {
+                  dedReason = `${remainingShort.toFixed(2)}h short of 9h — On Probation (no free permission allowance) — Hourly Salary Deduction`;
+                } else if (permHoursUsed === 0 && halfDayHours === 0 && allowanceUsedToday === 0) {
                   dedReason = `${remainingShort.toFixed(2)}h short of 9h, no LMS permission — Hourly Salary Deduction`;
                 } else if (empData.summary.monthlyAllowanceUsed >= 3) {
                   dedReason = `${remainingShort.toFixed(2)}h short beyond 3-Hour Monthly Permission Limit — LOP (Hourly Deduction)`;
@@ -1557,7 +1579,8 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           eligible_hours: eligibleHours.toFixed(2),
           deductible_short_hours: deductibleShortHoursToday.toFixed(2),
           hourly_deduction_amount: hourlyDeductionToday,
-          is_unpaid_half_day: isUnpaidHalfDay
+          is_unpaid_half_day: isUnpaidHalfDay,
+          on_probation: isOnProbation
         });
       }
 
@@ -2596,6 +2619,10 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       const loanDeduction = Number(item.loan_deduction) || 0;
       const advanceDeduction = Number(item.advance_deduction) || 0;
       const bonus = Number(item.bonus) || 0;
+      // Manual, admin-entered carry-forward balance from a previous month.
+      // Preserve it across regeneration exactly like bonus — it's not derived
+      // from attendance/LMS data so there's nothing to recompute here.
+      const previousMonthBalance = Number((item as any).previous_month_balance) || 0;
 
       const permissionHours = leaveData?.permission_hours ?? Number(item.permission_hours) ?? 0;
       // IMPORTANT: permission hours are already accounted for inside `hourly_deduction`
@@ -2765,7 +2792,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
 
       const netSalary = Math.max(
         0,
-        Math.round((baseSalaryForPay - leaveDeduction - timesheetDeduction - missingPunchDeduction - sandwichDeductionAmount - permissionDeduction - hourlyDeductionStored - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction + bonus + sundayEarnings) * 100) / 100
+        Math.round((baseSalaryForPay - leaveDeduction - timesheetDeduction - missingPunchDeduction - sandwichDeductionAmount - permissionDeduction - hourlyDeductionStored - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction + bonus + previousMonthBalance + sundayEarnings) * 100) / 100
       );
 
       return {
@@ -2821,6 +2848,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
         payslip_hold_reason: (item as any).payslip_hold_reason ?? null,
         hourly_short_hours: Number(item.hourly_short_hours) || 0,
         hourly_deduction: Number(item.hourly_deduction) || 0,
+        previous_month_balance: previousMonthBalance,
         net_salary: netSalary,
         timesheet_status: tsData?.submitted_at ? 'Submitted' : 'Not submitted',
         timesheet_submitted_at: tsData?.submitted_at || null,
@@ -2859,7 +2887,8 @@ router.patch('/payroll-items/:id', async (req, res) => {
     permission_hours,
     permission_deduction,
     hourly_short_hours,
-    hourly_deduction
+    hourly_deduction,
+    previous_month_balance
   } = req.body;
 
   let client;
@@ -2881,6 +2910,7 @@ router.patch('/payroll-items/:id', async (req, res) => {
     const storedAdvance = advance_deduction !== undefined ? parseFloat(advance_deduction) : parseFloat(item.advance_deduction || 0);
     const newSundayWork = sunday_work_days !== undefined ? parseFloat(sunday_work_days) : parseFloat(item.sunday_work_days || 0);
     const newBonus = bonus !== undefined ? parseFloat(bonus) : parseFloat(item.bonus || 0);
+    const newPreviousMonthBalance = previous_month_balance !== undefined ? parseFloat(previous_month_balance) : parseFloat(item.previous_month_balance || 0);
 
     const newUnpaidLeaves = unpaid_leaves !== undefined ? parseFloat(unpaid_leaves) : parseFloat(item.unpaid_leaves || 0);
     const newMissingTimesheets = missing_timesheets !== undefined ? parseInt(missing_timesheets) : parseInt(item.missing_timesheets || 0);
@@ -2919,7 +2949,7 @@ router.patch('/payroll-items/:id', async (req, res) => {
     const newHourlyDeduction = hourly_deduction !== undefined ? parseFloat(hourly_deduction) : parseFloat(item.hourly_deduction || 0);
 
     const totalDeductions = finalLeaveDeduction + tsDeduction + mpDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + storedAdvance + newPermissionDeduction + newHourlyDeduction;
-    const netSalary = Math.max(0, Math.round((baseSalaryForPay - totalDeductions + newBonus + sundayEarnings) * 100) / 100);
+    const netSalary = Math.max(0, Math.round((baseSalaryForPay - totalDeductions + newBonus + newPreviousMonthBalance + sundayEarnings) * 100) / 100);
 
     const updateRes = await client.query(
       `UPDATE payroll_items SET 
@@ -2938,8 +2968,9 @@ router.patch('/payroll-items/:id', async (req, res) => {
         missing_punches = $13,
         missing_punch_deduction = $14,
         hourly_short_hours = $15,
-        hourly_deduction = $16
-       WHERE id = $17 RETURNING *`,
+        hourly_deduction = $16,
+        previous_month_balance = $17
+       WHERE id = $18 RETURNING *`,
       [
         newSundayWork,
         newBonus,
@@ -2957,6 +2988,7 @@ router.patch('/payroll-items/:id', async (req, res) => {
         mpDeduction,
         newHourlyShortHours,
         newHourlyDeduction,
+        newPreviousMonthBalance,
         id
       ]
     );
@@ -3049,11 +3081,12 @@ router.patch('/payroll-items/:id/timesheet-exception', async (req, res) => {
     const permissionDeduction = parseFloat(item.permission_deduction || '0');
     const hourlyDeduction = parseFloat(item.hourly_deduction || '0');
     const bonus = parseFloat(item.bonus || '0');
+    const previousMonthBalance = parseFloat(item.previous_month_balance || '0');
     const sundayWorkDays = parseFloat(item.sunday_work_days || '0');
     const sundayEarnings = Math.round(dayRate * sundayWorkDays * 100) / 100;
 
     const totalDeductions = leaveDeduction + newTsDeduction + missingPunchDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + advanceDeduction + permissionDeduction + hourlyDeduction;
-    const netSalary = Math.max(0, Math.round((baseSalaryForPay - totalDeductions + bonus + sundayEarnings) * 100) / 100);
+    const netSalary = Math.max(0, Math.round((baseSalaryForPay - totalDeductions + bonus + previousMonthBalance + sundayEarnings) * 100) / 100);
 
     const noteValue = typeof note === 'string' && note.trim() ? note.trim() : null;
 
@@ -3150,11 +3183,12 @@ router.patch('/payroll-items/:id/missing-punch-exception', async (req, res) => {
     const permissionDeduction = parseFloat(item.permission_deduction || '0');
     const hourlyDeduction = parseFloat(item.hourly_deduction || '0');
     const bonus = parseFloat(item.bonus || '0');
+    const previousMonthBalance = parseFloat(item.previous_month_balance || '0');
     const sundayWorkDays = parseFloat(item.sunday_work_days || '0');
     const sundayEarnings = Math.round(dayRate * sundayWorkDays * 100) / 100;
 
     const totalDeductions = leaveDeduction + tsDeduction + newMpDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + advanceDeduction + permissionDeduction + hourlyDeduction;
-    const netSalary = Math.max(0, Math.round((baseSalaryForPay - totalDeductions + bonus + sundayEarnings) * 100) / 100);
+    const netSalary = Math.max(0, Math.round((baseSalaryForPay - totalDeductions + bonus + previousMonthBalance + sundayEarnings) * 100) / 100);
 
     const noteValue = typeof note === 'string' && note.trim() ? note.trim() : null;
 

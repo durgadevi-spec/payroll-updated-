@@ -460,6 +460,7 @@ export function PayslipTemplateEditor({ initialTemplate, onSave, onClose }: Prop
                         { key: 'net_salary', name: 'Net Salary Amount', icon: <Plus size={10} /> },
                         { key: 'month_year', name: 'Month & Year', icon: <Plus size={10} /> },
                         { key: 'basic_salary', name: 'Basic Salary', icon: <Plus size={10} /> },
+                        { key: 'previous_month_balance', name: 'Previous Month Balance', icon: <Plus size={10} /> },
                         { key: 'total_earnings', name: 'Total Earnings', icon: <Plus size={10} /> },
                         { key: 'total_deductions', name: 'Total Deductions', icon: <Plus size={10} /> }
                       ].map(field => (
@@ -615,4 +616,3 @@ export function PayslipTemplateEditor({ initialTemplate, onSave, onClose }: Prop
     </div>
   );
 }
-

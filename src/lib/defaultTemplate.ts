@@ -32,6 +32,7 @@ export const DEFAULT_PAYSLIP_TEMPLATE: PayslipTemplateContent = {
         { label: 'Conveyance Allowance', key: 'conveyance' },
         { label: 'Medical Allowance', key: 'medical' },
         { label: 'Special Allowance', key: 'bonus' },
+        { label: 'Previous Month Balance', key: 'previous_month_balance' },
       ],
     },
     deductions: {
