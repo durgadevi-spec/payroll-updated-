@@ -1442,84 +1442,100 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           }
         } else {
           // Working Day or Half-Day Leave
-          if (leave && leave.duration && leave.duration.toLowerCase().includes('half')) {
-            if (paSlaBalance >= 0.5) {
-              paSlaBalance -= 0.5;
-              empData.summary.paSlaConsumed += 0.5;
-              halfDayHours = 4;
-            } else {
-              halfDayHours = 4; // Treat as if they were granted the 4 hours so the biometric check doesn't double penalize
-              isUnpaidHalfDay = true;
+          const isHalfDay = !!(leave && leave.duration && leave.duration.toLowerCase().includes('half'));
+          const isHalfDayOD = isHalfDay && leave.type.toLowerCase() === 'od';
+
+          if (isHalfDayOD) {
+            // Half-day OD: employee was on official duty (client site / field work)
+            // for half the day — exactly like a full-day OD, this half is fully
+            // paid and carries NO biometric-punch requirement, and it does not
+            // consume PA/SL balance. Only treat the OD half as fully satisfied;
+            // it is never subject to the hourly-shortfall deduction below, which
+            // previously ran an ordinary half-day-leave check against it.
+            halfDayHours = 4;
+            eligibleHours += halfDayHours;
+            paidUnpaid = 'Paid (Half-Day OD)';
+            dedReason = 'Approved Half-Day OD - No Deduction';
+          } else {
+            if (isHalfDay) {
+              if (paSlaBalance >= 0.5) {
+                paSlaBalance -= 0.5;
+                empData.summary.paSlaConsumed += 0.5;
+                halfDayHours = 4;
+              } else {
+                halfDayHours = 4; // Treat as if they were granted the 4 hours so the biometric check doesn't double penalize
+                isUnpaidHalfDay = true;
+              }
             }
-          }
-          eligibleHours += halfDayHours;
+            eligibleHours += halfDayHours;
 
-          if (totalHours > 0 || halfDayHours > 0 || permHours > 0) {
-            if (eligibleHours < 9) {
-              const shortfall = 9 - eligibleHours;
-              // Probationary employees get no free monthly permission allowance —
-              // force availableAllowance to 0 so every short hour falls through
-              // to the deductible/hourly-deduction branch below.
-              const availableAllowance = isOnProbation ? 0 : (3 - empData.summary.monthlyAllowanceUsed);
-              if (availableAllowance > 0) {
-                const totalCoverage = Math.min(shortfall, availableAllowance);
-                allowanceUsedToday = totalCoverage;
-                empData.summary.monthlyAllowanceUsed += totalCoverage;
-                eligibleHours += totalCoverage;
+            if (totalHours > 0 || halfDayHours > 0 || permHours > 0) {
+              if (eligibleHours < 9) {
+                const shortfall = 9 - eligibleHours;
+                // Probationary employees get no free monthly permission allowance —
+                // force availableAllowance to 0 so every short hour falls through
+                // to the deductible/hourly-deduction branch below.
+                const availableAllowance = isOnProbation ? 0 : (3 - empData.summary.monthlyAllowanceUsed);
+                if (availableAllowance > 0) {
+                  const totalCoverage = Math.min(shortfall, availableAllowance);
+                  allowanceUsedToday = totalCoverage;
+                  empData.summary.monthlyAllowanceUsed += totalCoverage;
+                  eligibleHours += totalCoverage;
 
-                if (permHours > 0) {
-                  permHoursUsed = Math.min(permHours, totalCoverage);
+                  if (permHours > 0) {
+                    permHoursUsed = Math.min(permHours, totalCoverage);
+                  }
                 }
               }
             }
-          }
 
-          if (eligibleHours >= 9) {
-            paidUnpaid = 'Paid (Working)';
-            if (allowanceUsedToday > 0) {
-              dedReason = 'Within Monthly 3-Hour Permission Allowance - No Deduction';
-            } else if (permHoursUsed > 0) {
-              dedReason = 'Approved Permission - No Deduction';
-            } else if (halfDayHours > 0) {
-              dedReason = 'Approved Half-Day Leave - No Deduction';
-            } else {
-              dedReason = null;
-            }
-          } else {
-            if (totalHours === 0 && permHours === 0 && halfDayHours === 0) {
-              // User requirement: deduct salary for missing punch in & out if no LMS leave applied
-              paidUnpaid = 'Unpaid (Missing Punches)';
-              isDeductible = true;
-              dedReason = attStatus + ' (Salary Deducted)';
-            } else {
-              // Employee was present (biometric shows some hours) but total eligible hours,
-              // after adding any approved LMS permission / half-day / monthly 3h allowance,
-              // still falls short of the required 9 hours.
-              // Requirement: deduct salary proportional to the remaining short hours (not a full day),
-              // unless the shortfall is fully covered by permission/allowance.
-              const remainingShort = Math.round((9 - eligibleHours) * 100) / 100;
-              if (remainingShort > 0.01 && !isUnpaidHalfDay) {
-                deductibleShortHoursToday = remainingShort;
-                hourlyDeductionToday = Math.round(remainingShort * perHourSalaryForDed * 100) / 100;
-                paidUnpaid = 'Partially Paid (Hourly Deduction)';
-                isDeductible = false; // day itself is still "attended"; deduction is hour-based, not day-based
-                if (isOnProbation && permHours > 0) {
-                  dedReason = `${remainingShort.toFixed(2)}h short of 9h — On Probation (no free permission allowance) — Hourly Salary Deduction`;
-                } else if (permHoursUsed === 0 && halfDayHours === 0 && allowanceUsedToday === 0) {
-                  dedReason = `${remainingShort.toFixed(2)}h short of 9h, no LMS permission — Hourly Salary Deduction`;
-                } else if (empData.summary.monthlyAllowanceUsed >= 3) {
-                  dedReason = `${remainingShort.toFixed(2)}h short beyond 3-Hour Monthly Permission Limit — LOP (Hourly Deduction)`;
-                } else {
-                  dedReason = `${remainingShort.toFixed(2)}h short after permission/allowance — Hourly Salary Deduction`;
-                }
-                empData.summary.permissionLimitExceededDays++;
+            if (eligibleHours >= 9) {
+              paidUnpaid = 'Paid (Working)';
+              if (allowanceUsedToday > 0) {
+                dedReason = 'Within Monthly 3-Hour Permission Allowance - No Deduction';
+              } else if (permHoursUsed > 0) {
+                dedReason = 'Approved Permission - No Deduction';
+              } else if (halfDayHours > 0) {
+                dedReason = 'Approved Half-Day Leave - No Deduction';
               } else {
-                paidUnpaid = halfDayHours > 0 ? 'Paid (Half Leave)' : 'Paid (Missing Punches)';
-                isDeductible = false;
-                if (allowanceUsedToday > 0 || empData.summary.monthlyAllowanceUsed >= 3) {
-                  dedReason = 'Within Monthly 3-Hour Permission Allowance - No Deduction';
+                dedReason = null;
+              }
+            } else {
+              if (totalHours === 0 && permHours === 0 && halfDayHours === 0) {
+                // User requirement: deduct salary for missing punch in & out if no LMS leave applied
+                paidUnpaid = 'Unpaid (Missing Punches)';
+                isDeductible = true;
+                dedReason = attStatus + ' (Salary Deducted)';
+              } else {
+                // Employee was present (biometric shows some hours) but total eligible hours,
+                // after adding any approved LMS permission / half-day / monthly 3h allowance,
+                // still falls short of the required 9 hours.
+                // Requirement: deduct salary proportional to the remaining short hours (not a full day),
+                // unless the shortfall is fully covered by permission/allowance.
+                const remainingShort = Math.round((9 - eligibleHours) * 100) / 100;
+                if (remainingShort > 0.01 && !isUnpaidHalfDay) {
+                  deductibleShortHoursToday = remainingShort;
+                  hourlyDeductionToday = Math.round(remainingShort * perHourSalaryForDed * 100) / 100;
+                  paidUnpaid = 'Partially Paid (Hourly Deduction)';
+                  isDeductible = false; // day itself is still "attended"; deduction is hour-based, not day-based
+                  if (isOnProbation && permHours > 0) {
+                    dedReason = `${remainingShort.toFixed(2)}h short of 9h — On Probation (no free permission allowance) — Hourly Salary Deduction`;
+                  } else if (permHoursUsed === 0 && halfDayHours === 0 && allowanceUsedToday === 0) {
+                    dedReason = `${remainingShort.toFixed(2)}h short of 9h, no LMS permission — Hourly Salary Deduction`;
+                  } else if (empData.summary.monthlyAllowanceUsed >= 3) {
+                    dedReason = `${remainingShort.toFixed(2)}h short beyond 3-Hour Monthly Permission Limit — LOP (Hourly Deduction)`;
+                  } else {
+                    dedReason = `${remainingShort.toFixed(2)}h short after permission/allowance — Hourly Salary Deduction`;
+                  }
+                  empData.summary.permissionLimitExceededDays++;
                 } else {
-                  dedReason = attStatus + ' (No Salary Deduction)';
+                  paidUnpaid = halfDayHours > 0 ? 'Paid (Half Leave)' : 'Paid (Missing Punches)';
+                  isDeductible = false;
+                  if (allowanceUsedToday > 0 || empData.summary.monthlyAllowanceUsed >= 3) {
+                    dedReason = 'Within Monthly 3-Hour Permission Allowance - No Deduction';
+                  } else {
+                    dedReason = attStatus + ' (No Salary Deduction)';
+                  }
                 }
               }
             }

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import ExcelJS from 'exceljs';
 import { Calculator, Play, ChevronDown, ChevronUp, CheckCircle2, DollarSign, AlertTriangle, Trash2, Eye, Edit2, FileSpreadsheet, Info, X, RefreshCw, FileText, Maximize2, Minimize2, ShieldCheck } from 'lucide-react';
 import { PreGenerationAnalysisModal } from '../components/PreGenerationAnalysisModal';
 import { Payroll as PayrollType, PayrollItem, Employee } from '../types/index';
@@ -832,15 +833,6 @@ export function Payroll() {
         'Net Salary'
       ];
 
-      const escapeCell = (v: any) => {
-        if (v === null || v === undefined) return '';
-        const s = String(v);
-        if (s.includes(',') || s.includes('"') || s.includes('\n')) {
-          return '"' + s.replace(/"/g, '""') + '"';
-        }
-        return s;
-      };
-
       const rows = items.map((item: any) => [
         item.employee?.name || '',
         item.employee?.employee_code || '',
@@ -869,17 +861,181 @@ export function Payroll() {
         (item.net_salary || 0)
       ] as any[]);
 
-      const csvLines = [headers.map(escapeCell).join(',')];
-      for (const r of rows) {
-        csvLines.push(r.map(escapeCell).join(','));
+      // ---- Build a real, color-shaded .xlsx (not a plain CSV) ----
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = 'Payroll System';
+      workbook.created = new Date();
+
+      const sheet = workbook.addWorksheet(`Payroll ${getMonthName(payroll.month)} ${payroll.year}`, {
+        views: [{ state: 'frozen', xSplit: 2, ySplit: 3 }], // freeze employee name/code + header rows
+        pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1 }
+      });
+
+      const COL_COUNT = headers.length;
+
+      // ---- Colors ----
+      const TITLE_FILL = 'FF0F2A44';      // near-black navy — title banner
+      const TITLE_FONT = 'FFFFFFFF';
+      const HEADER_FILL = 'FF1E3A5F';     // dark navy
+      const HEADER_FONT = 'FFFFFFFF';     // white
+      const BAND_FILL = 'FFF3F6FA';       // very light blue-gray (alternating rows)
+      const BASE_PAY_FILL = 'FFE8F1FB';   // light blue — base/monthly salary reference
+      const DEDUCTION_FILL = 'FFFBE3E1';  // light red/pink — any deduction > 0
+      const DEDUCTION_FONT = 'FFB3261E';  // dark red text for deduction values
+      const CREDIT_FILL = 'FFE6F4EA';     // light green — bonus / carry-forward when > 0
+      const NET_FILL = 'FFDCEFE0';        // medium-light green — Net Salary column (final result)
+      const NET_FONT = 'FF1E7C3A';        // dark green text
+      const HOLD_FILL = 'FFFFF1D6';       // amber — payslip on hold
+      const HOLD_FONT = 'FF8A5A00';
+      const TOTAL_FILL = 'FF1E3A5F';      // dark navy — totals row
+      const TOTAL_FONT = 'FFFFFFFF';
+      const GRID_COLOR = 'FFD9DEE4';      // light gray grid lines
+      const OUTER_COLOR = 'FF0F2A44';     // strong dark border for the outer table frame
+
+      const gridBorder = {
+        top: { style: 'thin' as const, color: { argb: GRID_COLOR } },
+        left: { style: 'thin' as const, color: { argb: GRID_COLOR } },
+        bottom: { style: 'thin' as const, color: { argb: GRID_COLOR } },
+        right: { style: 'thin' as const, color: { argb: GRID_COLOR } },
+      };
+
+      // ---- Row 1: Title banner (merged across all columns) ----
+      sheet.mergeCells(1, 1, 1, COL_COUNT);
+      const titleCell = sheet.getCell(1, 1);
+      titleCell.value = `Payroll Report — ${getMonthName(payroll.month)} ${payroll.year}`;
+      titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: TITLE_FILL } };
+      titleCell.font = { bold: true, size: 14, color: { argb: TITLE_FONT } };
+      titleCell.alignment = { vertical: 'middle', horizontal: 'center' };
+      sheet.getRow(1).height = 30;
+
+      // ---- Row 2: Color legend (merged across all columns) ----
+      sheet.mergeCells(2, 1, 2, COL_COUNT);
+      const legendCell = sheet.getCell(2, 1);
+      legendCell.value = '■ Base Pay (blue)    ■ Deduction > 0 (red)    ■ Bonus/Credit > 0 (green)    ■ Net Salary (dark green)    ■ Payslip On Hold (amber)';
+      legendCell.font = { italic: true, size: 9, color: { argb: 'FF5B6472' } };
+      legendCell.alignment = { vertical: 'middle', horizontal: 'left' };
+      sheet.getRow(2).height = 18;
+
+      // ---- Row 3: Header ----
+      const headerRowNum = 3;
+      headers.forEach((h, i) => {
+        const cell = sheet.getCell(headerRowNum, i + 1);
+        cell.value = h;
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: HEADER_FILL } };
+        cell.font = { bold: true, color: { argb: HEADER_FONT } };
+        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        cell.border = {
+          top: { style: 'thin', color: { argb: GRID_COLOR } },
+          left: { style: 'thin', color: { argb: GRID_COLOR } },
+          bottom: { style: 'medium', color: { argb: OUTER_COLOR } }, // strong divider under header
+          right: { style: 'thin', color: { argb: GRID_COLOR } },
+        };
+      });
+      sheet.getRow(headerRowNum).height = 32;
+
+      // Column widths (set directly, since we built rows manually above)
+      const currencyFmt = '#,##0.00';
+      const colWidths = [22, 14, 14, 16, 12, 14, 12, 14, 12, 14, 12, 14, 12, 14, 12, 14, 10, 14, 12, 12, 12, 12, 12, 16, 16];
+      const numFmtCols = new Set([2, 3, 5, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 24]); // 0-indexed cols with currency
+      colWidths.forEach((w, i) => { sheet.getColumn(i + 1).width = w; });
+
+      // ---- Data rows ----
+      const firstDataRow = headerRowNum + 1;
+      const deductionCols = [5, 7, 9, 11, 13, 15, 17, 19, 20, 21]; // 0-indexed: leaveDed, tsDed, punchDed, sandwichDed, permDed, hourlyDed, advanceDed, pf, esi, tax
+      const basePayCols = [2, 3];  // ctc, monthlySalary
+      const creditCols = [22, 23]; // bonus, prevBalance
+      const netCol = 24;           // net salary
+      const nameCol = 0;
+
+      items.forEach((item: any, idx: number) => {
+        const rowNum = firstDataRow + idx;
+        const rowValues = rows[idx];
+        const isOnHold = !!item.payslip_hold_reason || item.payslip_status === 'hold' || item.payslip_status === 'on_hold';
+        const isBandedRow = idx % 2 === 1;
+
+        rowValues.forEach((val: any, colIdx: number) => {
+          const cell = sheet.getCell(rowNum, colIdx + 1);
+          cell.value = val;
+          if (numFmtCols.has(colIdx)) cell.numFmt = currencyFmt;
+
+          cell.border = gridBorder;
+
+          if (colIdx === netCol) {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NET_FILL } };
+            cell.font = { bold: true, color: { argb: NET_FONT } };
+          } else if (isOnHold) {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: HOLD_FILL } };
+            cell.font = { color: { argb: HOLD_FONT } };
+          } else if (basePayCols.includes(colIdx)) {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BASE_PAY_FILL } };
+          } else if (deductionCols.includes(colIdx) && typeof val === 'number' && val > 0) {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: DEDUCTION_FILL } };
+            cell.font = { color: { argb: DEDUCTION_FONT } };
+          } else if (creditCols.includes(colIdx) && typeof val === 'number' && val > 0) {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: CREDIT_FILL } };
+          } else if (isBandedRow) {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND_FILL } };
+          }
+
+          if (colIdx === nameCol) {
+            cell.font = { ...(cell.font || {}), bold: true };
+            cell.alignment = { vertical: 'middle', horizontal: 'left' };
+          } else {
+            cell.alignment = { vertical: 'middle', horizontal: colIdx <= 1 ? 'left' : 'center' };
+          }
+        });
+
+        sheet.getRow(rowNum).height = 18;
+      });
+
+      // ---- Totals row ----
+      const totalRowNum = firstDataRow + items.length;
+      const sumCols = [2, 3, 5, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 24]; // every currency column
+      for (let c = 1; c <= COL_COUNT; c++) {
+        const cell = sheet.getCell(totalRowNum, c);
+        const colIdx = c - 1;
+        if (colIdx === 0) {
+          cell.value = 'TOTAL';
+        } else if (sumCols.includes(colIdx)) {
+          const colLetter = sheet.getColumn(c).letter;
+          cell.value = { formula: `SUM(${colLetter}${firstDataRow}:${colLetter}${totalRowNum - 1})` };
+          cell.numFmt = currencyFmt;
+        }
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: TOTAL_FILL } };
+        cell.font = { bold: true, color: { argb: TOTAL_FONT } };
+        cell.alignment = { vertical: 'middle', horizontal: colIdx === 0 ? 'left' : 'center' };
+        cell.border = {
+          top: { style: 'medium', color: { argb: OUTER_COLOR } },
+          left: { style: 'thin', color: { argb: GRID_COLOR } },
+          bottom: { style: 'medium', color: { argb: OUTER_COLOR } },
+          right: { style: 'thin', color: { argb: GRID_COLOR } },
+        };
+      }
+      sheet.getRow(totalRowNum).height = 22;
+
+      // ---- Strong outer border around the whole table (header through totals) ----
+      for (let r = headerRowNum; r <= totalRowNum; r++) {
+        const leftCell = sheet.getCell(r, 1);
+        const rightCell = sheet.getCell(r, COL_COUNT);
+        leftCell.border = { ...leftCell.border, left: { style: 'medium', color: { argb: OUTER_COLOR } } };
+        rightCell.border = { ...rightCell.border, right: { style: 'medium', color: { argb: OUTER_COLOR } } };
+      }
+      for (let c = 1; c <= COL_COUNT; c++) {
+        const topCell = sheet.getCell(headerRowNum, c);
+        const bottomCell = sheet.getCell(totalRowNum, c);
+        topCell.border = { ...topCell.border, top: { style: 'medium', color: { argb: OUTER_COLOR } } };
+        bottomCell.border = { ...bottomCell.border, bottom: { style: 'medium', color: { argb: OUTER_COLOR } } };
       }
 
-      const csv = csvLines.join('\r\n');
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      // Autofilter on the header row (lets the user filter/sort in Excel)
+      sheet.autoFilter = { from: { row: headerRowNum, column: 1 }, to: { row: headerRowNum, column: COL_COUNT } };
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `Payroll_${getMonthName(payroll.month)}_${payroll.year}.csv`;
+      a.download = `Payroll_${getMonthName(payroll.month)}_${payroll.year}.xlsx`;
       document.body.appendChild(a);
       a.click();
       a.remove();
