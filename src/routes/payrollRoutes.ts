@@ -1271,7 +1271,8 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           deductibleShortfallHours: 0, // of the above, hours NOT covered — these get deducted (incl. LOP beyond 3h monthly cap)
           hourlyDeductionAmount: 0,    // rupee amount deducted for deductibleShortfallHours
           totalExcessHours: 0,          // total hours worked beyond 9h/day across all working days
-          paSlaConsumed: 0             // days of PA/SLA balance actually used this month to avoid a leave deduction
+          paSlaConsumed: 0,             // days of PA/SLA balance actually used this month to avoid a leave deduction
+          plSlSandwichDays: 0           // Sundays where PL/SL Sandwich Rule applied (Sat + Mon both PL/SL leave)
         }
       };
       // Per-hour rate for the new hourly-shortfall deduction, based on a 9-hour working day
@@ -1326,6 +1327,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
             salary_deduction_applicable: false,
             deduction_reason: 'Before joining date',
             sunday_sandwich: false,
+            pl_sl_sandwich: false,
             permission_status: 'None',
             permission_from: '-',
             permission_to: '-',
@@ -1360,6 +1362,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
             salary_deduction_applicable: false,
             deduction_reason: 'After relieving date',
             sunday_sandwich: false,
+            pl_sl_sandwich: false,
             permission_status: 'None',
             permission_from: '-',
             permission_to: '-',
@@ -1413,9 +1416,51 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
         let deductibleShortHoursToday = 0;
         let hourlyDeductionToday = 0;
         let permHoursUsed = 0;
+        let isPlSlSandwichDay = false;
 
-        if (isSunday || isHoliday) {
+        if (isHoliday) {
           paidUnpaid = 'Paid';
+        } else if (isSunday) {
+          // PL/SL Sandwich Rule: if the employee has a full-day PL/SL leave
+          // applied (not OD, not Comp Off, not half-day) on BOTH the
+          // surrounding Saturday and Monday, this Sunday is sandwiched too —
+          // one extra PL/SL day is deducted from the balance for it. This is
+          // judged from the raw LMS leave records (whether or not balance
+          // ultimately covers Sat/Mon), and the balance is consumed here —
+          // chronologically BEFORE Monday's own turn later in this loop — so
+          // it charges Sat -> Sun(sandwich) -> Mon in real calendar order.
+          const isPlSlEligibleLeave = (lv: any) => {
+            if (!lv) return false;
+            const t = (lv.type || '').toLowerCase().trim();
+            if (t === 'od' || t === 'comp off') return false;
+            if (lv.duration && lv.duration.toLowerCase().includes('half')) return false;
+            return true;
+          };
+          let isSandwichSunday = false;
+          if (d > 1 && d < endDate.getDate()) {
+            const satDate = new Date(year, month - 1, d - 1);
+            const monDate = new Date(year, month - 1, d + 1);
+            const satStr = `${satDate.getFullYear()}-${String(satDate.getMonth() + 1).padStart(2, '0')}-${String(satDate.getDate()).padStart(2, '0')}`;
+            const monStr = `${monDate.getFullYear()}-${String(monDate.getMonth() + 1).padStart(2, '0')}-${String(monDate.getDate()).padStart(2, '0')}`;
+            isSandwichSunday = isPlSlEligibleLeave(empLeaves.get(satStr)) && isPlSlEligibleLeave(empLeaves.get(monStr));
+          }
+
+          if (isSandwichSunday) {
+            isPlSlSandwichDay = true;
+            empData.summary.plSlSandwichDays++;
+            if (paSlaBalance >= 1) {
+              paSlaBalance -= 1;
+              empData.summary.paSlaConsumed += 1;
+              paidUnpaid = 'Paid Leave (Sandwich)';
+              dedReason = 'Sunday PL/SL Sandwich - 1 Day Deducted from PL/SL Balance';
+            } else {
+              isDeductible = true;
+              paidUnpaid = 'Unpaid Sandwich (No PL/SL Balance)';
+              dedReason = 'Sunday PL/SL Sandwich - No PL/SL Balance Remaining, Salary Deducted';
+            }
+          } else {
+            paidUnpaid = 'Paid';
+          }
         } else if (leave && (!leave.duration || !leave.duration.toLowerCase().includes('half'))) {
           // Full Day Leave
           if (leave.type.toLowerCase() === 'od') {
@@ -1445,31 +1490,60 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           const isHalfDay = !!(leave && leave.duration && leave.duration.toLowerCase().includes('half'));
           const isHalfDayOD = isHalfDay && leave.type.toLowerCase() === 'od';
 
-          if (isHalfDayOD) {
-            // Half-day OD: employee was on official duty (client site / field work)
-            // for half the day — exactly like a full-day OD, this half is fully
-            // paid and carries NO biometric-punch requirement, and it does not
-            // consume PA/SL balance. Only treat the OD half as fully satisfied;
-            // it is never subject to the hourly-shortfall deduction below, which
-            // previously ran an ordinary half-day-leave check against it.
+          if (isHalfDay) {
+            // Half-Day OD / Half-Day Leave: one half of the day is covered
+            // (OD is always fully paid for that half; PL/SL leave is paid
+            // for that half only if balance is available). The OTHER
+            // ("balance") half of the day must still be covered by actual
+            // biometric punch hours. If the balance half is short, it is a
+            // flat half-day (0.5 day) salary deduction — e.g. Rs.500/day ->
+            // Rs.250 deducted — never a proportional hourly deduction.
+            // This balance-half shortfall is NEVER covered by
+            // the monthly 3-hour permission allowance or by any approved
+            // LMS permission hours, and never consumes/reduces that
+            // monthly allowance ("balance half day will not come in the
+            // permissions").
             halfDayHours = 4;
-            eligibleHours += halfDayHours;
-            paidUnpaid = 'Paid (Half-Day OD)';
-            dedReason = 'Approved Half-Day OD - No Deduction';
-          } else {
-            if (isHalfDay) {
-              if (paSlaBalance >= 0.5) {
-                paSlaBalance -= 0.5;
-                empData.summary.paSlaConsumed += 0.5;
-                halfDayHours = 4;
-              } else {
-                halfDayHours = 4; // Treat as if they were granted the 4 hours so the biometric check doesn't double penalize
-                isUnpaidHalfDay = true;
-              }
-            }
-            eligibleHours += halfDayHours;
+            let leaveHalfUnpaid = false;
 
-            if (totalHours > 0 || halfDayHours > 0 || permHours > 0) {
+            if (isHalfDayOD) {
+              paidUnpaid = 'Paid (Half-Day OD)';
+            } else if (paSlaBalance >= 0.5) {
+              paSlaBalance -= 0.5;
+              empData.summary.paSlaConsumed += 0.5;
+              paidUnpaid = 'Paid Leave (Half-Day)';
+            } else {
+              leaveHalfUnpaid = true;
+              paidUnpaid = 'Unpaid Leave (Half-Day)';
+            }
+
+            // Balance half is judged on raw biometric hours only.
+            eligibleHours = totalHours + halfDayHours;
+            const balanceHalfShortfall = Math.round((9 - eligibleHours) * 100) / 100;
+            const balanceHalfUnpaid = balanceHalfShortfall > 0.01;
+            if (balanceHalfUnpaid) {
+              // Tracked for reporting only — the actual deduction is the
+              // flat half-day below, not an hourly amount.
+              deductibleShortHoursToday = balanceHalfShortfall;
+            }
+
+            if (leaveHalfUnpaid && balanceHalfUnpaid) {
+              // Both halves unpaid — full day deducted
+              isDeductible = true;
+              paidUnpaid = 'Unpaid (Half-Day Leave + Balance Half-Day)';
+              dedReason = 'No PL/SL Balance for Half-Day Leave and Balance Half-Day Not Worked - Full Day Deducted';
+            } else if (leaveHalfUnpaid) {
+              isUnpaidHalfDay = true;
+              dedReason = 'No PL/SL Balance for Half-Day Leave - 0.5 Day Deducted';
+            } else if (balanceHalfUnpaid) {
+              isUnpaidHalfDay = true;
+              dedReason = (isHalfDayOD ? 'Approved Half-Day OD' : 'Approved Half-Day Leave') +
+                ' - Balance Half-Day Not Worked (Not Covered by Permission) - 0.5 Day Deducted';
+            } else {
+              dedReason = (isHalfDayOD ? 'Approved Half-Day OD' : 'Approved Half-Day Leave') + ' - No Deduction';
+            }
+          } else {
+            if (totalHours > 0 || permHours > 0) {
               if (eligibleHours < 9) {
                 const shortfall = 9 - eligibleHours;
                 // Probationary employees get no free monthly permission allowance —
@@ -1495,32 +1569,30 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
                 dedReason = 'Within Monthly 3-Hour Permission Allowance - No Deduction';
               } else if (permHoursUsed > 0) {
                 dedReason = 'Approved Permission - No Deduction';
-              } else if (halfDayHours > 0) {
-                dedReason = 'Approved Half-Day Leave - No Deduction';
               } else {
                 dedReason = null;
               }
             } else {
-              if (totalHours === 0 && permHours === 0 && halfDayHours === 0) {
+              if (totalHours === 0 && permHours === 0) {
                 // User requirement: deduct salary for missing punch in & out if no LMS leave applied
                 paidUnpaid = 'Unpaid (Missing Punches)';
                 isDeductible = true;
                 dedReason = attStatus + ' (Salary Deducted)';
               } else {
                 // Employee was present (biometric shows some hours) but total eligible hours,
-                // after adding any approved LMS permission / half-day / monthly 3h allowance,
+                // after adding any approved LMS permission / monthly 3h allowance,
                 // still falls short of the required 9 hours.
                 // Requirement: deduct salary proportional to the remaining short hours (not a full day),
                 // unless the shortfall is fully covered by permission/allowance.
                 const remainingShort = Math.round((9 - eligibleHours) * 100) / 100;
-                if (remainingShort > 0.01 && !isUnpaidHalfDay) {
+                if (remainingShort > 0.01) {
                   deductibleShortHoursToday = remainingShort;
                   hourlyDeductionToday = Math.round(remainingShort * perHourSalaryForDed * 100) / 100;
                   paidUnpaid = 'Partially Paid (Hourly Deduction)';
                   isDeductible = false; // day itself is still "attended"; deduction is hour-based, not day-based
                   if (isOnProbation && permHours > 0) {
                     dedReason = `${remainingShort.toFixed(2)}h short of 9h — On Probation (no free permission allowance) — Hourly Salary Deduction`;
-                  } else if (permHoursUsed === 0 && halfDayHours === 0 && allowanceUsedToday === 0) {
+                  } else if (permHoursUsed === 0 && allowanceUsedToday === 0) {
                     dedReason = `${remainingShort.toFixed(2)}h short of 9h, no LMS permission — Hourly Salary Deduction`;
                   } else if (empData.summary.monthlyAllowanceUsed >= 3) {
                     dedReason = `${remainingShort.toFixed(2)}h short beyond 3-Hour Monthly Permission Limit — LOP (Hourly Deduction)`;
@@ -1529,7 +1601,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
                   }
                   empData.summary.permissionLimitExceededDays++;
                 } else {
-                  paidUnpaid = halfDayHours > 0 ? 'Paid (Half Leave)' : 'Paid (Missing Punches)';
+                  paidUnpaid = 'Paid (Missing Punches)';
                   isDeductible = false;
                   if (allowanceUsedToday > 0 || empData.summary.monthlyAllowanceUsed >= 3) {
                     dedReason = 'Within Monthly 3-Hour Permission Allowance - No Deduction';
@@ -1567,7 +1639,9 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
 
         if (isUnpaidHalfDay) {
           paidUnpaid = 'Partially Paid (Unpaid Half Leave)';
-          dedReason = (dedReason && dedReason !== 'Approved Half-Day Leave - No Deduction') ? dedReason + ' | Unpaid Half-Day Leave - 0.5 Day Deducted' : 'Unpaid Half-Day Leave - 0.5 Day Deducted';
+          dedReason = (dedReason && !dedReason.includes('0.5 Day Deducted'))
+            ? dedReason + ' | 0.5 Day Deducted'
+            : (dedReason || 'Unpaid Half-Day Leave - 0.5 Day Deducted');
         }
 
         empData.days.push({
@@ -1585,6 +1659,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           salary_deduction_applicable: isDeductible,
           deduction_reason: dedReason,
           sunday_sandwich: false,
+          pl_sl_sandwich: isPlSlSandwichDay,
           permission_status: perm ? 'Approved' : 'None',
           permission_from: perm?.from_time ? String(perm.from_time).substring(0, 5) : '-',
           permission_to: perm?.to_time ? String(perm.to_time).substring(0, 5) : '-',
@@ -1625,6 +1700,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
         if (day.salary_deduction_applicable) {
           empData.summary.unpaidDays++;
           if (day.sunday_sandwich) empData.summary.sundayDeductions++;
+          else if (day.pl_sl_sandwich) { /* counted in plSlSandwichDays already — not a punch-missing day */ }
           else if (day.attendance_status === 'Less Than 9 Hours') empData.summary.lessThan9++;
           else if (!day.paid_unpaid.includes('Leave')) empData.summary.punchMissing++;
         } else {
