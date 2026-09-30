@@ -25,6 +25,7 @@ interface SettingsMap {
   payroll_date: string;
   alert_admin_emails: string;
   alert_hr_emails: string;
+  timesheet_approval_required: string; // 'true' | 'false'
 }
 
 interface Department {
@@ -45,6 +46,7 @@ const defaultSettings: SettingsMap = {
   smtp_host: '', smtp_port: '587', smtp_user: '', smtp_pass: '', smtp_from: '', payroll_date: '1',
   alert_admin_emails: 'sp@ctint.in,durgadevi@ctint.in',
   alert_hr_emails: 'pushpa.p@ctint.in',
+  timesheet_approval_required: 'false',
 };
 
 export function Settings() {
@@ -292,6 +294,32 @@ export function Settings() {
                 <Input label="ESI Rate (%)" type="number" value={settings.esi_rate} onChange={set('esi_rate')} hint="Employee State Insurance deduction rate" />
                 <Input label="ESI Salary Limit (₹)" type="number" value={settings.esi_limit} onChange={set('esi_limit')} hint="ESI applies only if salary is below this limit" prefix="₹" />
                 <Input label="Income Tax Rate (%)" type="number" value={settings.tax_rate} onChange={set('tax_rate')} hint="Flat income tax deduction rate" />
+              </div>
+
+              <div className="flex items-start justify-between gap-4 p-4 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50">
+                <div>
+                  <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">Timesheet needs approval</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                    <span className="font-medium">ON</span> — a day's salary is paid only if that day's timesheet is approved by the manager or the admin (either one is enough).
+                    Submitted-but-unapproved days are treated as missing timesheet (LOP) and shown as "not approved".
+                    <br />
+                    <span className="font-medium">OFF</span> — a submitted timesheet is enough; approval is not checked.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={settings.timesheet_approval_required === 'true'}
+                  onClick={() => setSettings(prev => ({ ...prev, timesheet_approval_required: prev.timesheet_approval_required === 'true' ? 'false' : 'true' }))}
+                  className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
+                    settings.timesheet_approval_required === 'true' ? 'bg-blue-600' : 'bg-slate-300 dark:bg-slate-600'
+                  }`}
+                  title={settings.timesheet_approval_required === 'true' ? 'Timesheet approval required (ON)' : 'Timesheet approval not required (OFF)'}
+                >
+                  <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                    settings.timesheet_approval_required === 'true' ? 'translate-x-5' : 'translate-x-0.5'
+                  }`} />
+                </button>
               </div>
             </>
           )}

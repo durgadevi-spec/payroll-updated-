@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import ExcelJS from 'exceljs';
-import { Calculator, Play, ChevronDown, ChevronUp, CheckCircle2, DollarSign, AlertTriangle, Trash2, Eye, Edit2, FileSpreadsheet, Info, X, RefreshCw, FileText, Maximize2, Minimize2, ShieldCheck } from 'lucide-react';
+import { Calculator, Play, ChevronDown, ChevronUp, CheckCircle2, DollarSign, AlertTriangle, Trash2, Eye, Edit2, FileSpreadsheet, Info, X, RefreshCw, FileText, Maximize2, Minimize2, ShieldCheck, Lock, Unlock } from 'lucide-react';
 import { PreGenerationAnalysisModal } from '../components/PreGenerationAnalysisModal';
 import { Payroll as PayrollType, PayrollItem, Employee } from '../types/index';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
+import { useAuth } from '../context/AuthContext';
 import { calculatePayroll, formatCurrency, getCurrentMonth, getMonthName } from '../lib/payrollCalculator';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -246,6 +247,8 @@ const getNetSalary = (item: PayrollItemWithEmployee, month?: number, year?: numb
 
 export function Payroll() {
   const { showToast } = useToast();
+  const { user } = useAuth();
+  const [lockingPayrollId, setLockingPayrollId] = useState<string | null>(null);
   const [payrolls, setPayrolls] = useState<PayrollType[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedPayroll, setSelectedPayroll] = useState<PayrollType | null>(null);
@@ -259,7 +262,7 @@ export function Payroll() {
   const latestAnalysisRequestIdRef = React.useRef<string | null>(null);
   const [analysisPayroll, setAnalysisPayroll] = useState<PayrollType | null>(null);
   const [analysisItems, setAnalysisItems] = useState<(PayrollItemWithEmployee & { leave_source?: string; timesheet_status?: string; timesheet_submitted_at?: string | null })[]>([]);
-  const [missingDatesModal, setMissingDatesModal] = useState<{ name: string; dates: string[] } | null>(null);
+  const [missingDatesModal, setMissingDatesModal] = useState<{ name: string; dates: string[]; unapproved?: string[] } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [showConfigModal, setShowConfigModal] = useState(false);
@@ -394,6 +397,10 @@ export function Payroll() {
 
   async function updatePayrollItem() {
     if (!editingItem) return;
+    if (payrolls.find(p => p.id === editingItem.payroll_id)?.is_locked) {
+      showToast('error', 'This payroll is locked. Unlock it before editing.');
+      return;
+    }
     try {
       const response = await fetch(`/api/payroll-items/${editingItem.id}`, {
         method: 'PATCH',
@@ -417,8 +424,46 @@ export function Payroll() {
     }
   }
 
+  // Lock / unlock a generated payroll. While locked, its figures are frozen: the
+  // server serves the snapshot taken at lock time and rejects every edit.
+  async function togglePayrollLock(payroll: PayrollType) {
+    const locking = !payroll.is_locked;
+    const confirmed = window.confirm(
+      locking
+        ? `Lock payroll for ${getMonthName(payroll.month)} ${payroll.year} (V${payroll.version || 1})?\n\nIts values will be frozen exactly as they are now. Later changes to attendance, leaves, timesheets, holidays or settings will NOT change this payroll, and it can't be edited or deleted until you unlock it.`
+        : `Unlock payroll for ${getMonthName(payroll.month)} ${payroll.year} (V${payroll.version || 1})?\n\nIts values will be calculated live again and it can be edited.`
+    );
+    if (!confirmed) return;
+
+    setLockingPayrollId(payroll.id);
+    try {
+      const res = await fetch(`/api/payroll/${payroll.id}/${locking ? 'lock' : 'unlock'}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(locking ? { locked_by: user?.email || null } : { unlocked_by: user?.email || null }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({} as any));
+        throw new Error(d.error || `Failed to ${locking ? 'lock' : 'unlock'} payroll`);
+      }
+      showToast('success', locking ? 'Payroll locked — its values are now frozen' : 'Payroll unlocked');
+      await loadPayrolls();
+      // Reload whichever views are open so they show the frozen / live figures immediately.
+      if (selectedPayroll?.id === payroll.id) await loadPayrollItems(payroll.id);
+      if (analysisPayroll?.id === payroll.id) await loadPayrollAnalysis(payroll);
+    } catch (err: any) {
+      console.error(err);
+      showToast('error', err?.message || 'Failed to change payroll lock');
+    }
+    setLockingPayrollId(null);
+  }
+
   async function handleRefreshPayroll() {
     if (!analysisPayroll) return;
+    if (payrolls.find(p => p.id === analysisPayroll.id)?.is_locked) {
+      showToast('error', 'This payroll is locked. Unlock it before refreshing.');
+      return;
+    }
     setRefreshing(true);
     try {
       // 1. Fetch updated external data by calling the analysis route (which calculates everything live)
@@ -564,7 +609,18 @@ export function Payroll() {
 
         const totalUnpaid = emp.summary.unpaidDays || 0;
         const punchMissing = emp.summary.punchMissing || 0;
-        const sundayDeductions = emp.summary.sundayDeductions || 0;
+        // A "sandwich" Sunday whose Saturday or Monday is an LMS leave day (e.g. PL/SL with no
+        // balance left) is NOT picked up by the punch-based sandwich rule on the Payroll page
+        // (that rule deliberately skips any Sunday next to an approved leave day), so its
+        // deduction would be lost. Bill those Sundays through the leave deduction instead — the
+        // same way an unpaid PL/SL-sandwich Sunday is already billed. Sundays sandwiched between
+        // plain missing-punch days are untouched and still handled by the Payroll page's live rule.
+        const leaveLinkedSandwichSundays = (emp.days || []).reduce((count: number, day: any, i: number, all: any[]) => {
+          if (!day?.sunday_sandwich || i === 0 || i >= all.length - 1) return count;
+          const hasLeave = (d: any) => !!d && d.leave_type && d.leave_type !== '-';
+          return (hasLeave(all[i - 1]) || hasLeave(all[i + 1])) ? count + 1 : count;
+        }, 0);
+        const sundayDeductions = Math.max(0, (emp.summary.sundayDeductions || 0) - leaveLinkedSandwichSundays);
         const lessThan9 = emp.summary.lessThan9 || 0;
 
         const nonLeaveDeductions = punchMissing + sundayDeductions + lessThan9;
@@ -756,6 +812,10 @@ export function Payroll() {
   }
 
   async function deletePayroll(payroll: PayrollType) {
+    if (payroll.is_locked) {
+      showToast('error', 'This payroll is locked. Unlock it before deleting.');
+      return;
+    }
     const confirmed = window.confirm(`Delete payroll for ${getMonthName(payroll.month)} ${payroll.year}? This will remove associated payroll items and payslips.`);
     if (!confirmed) return;
 
@@ -1062,6 +1122,10 @@ export function Payroll() {
     }
   }
 
+  // Read from the live `payrolls` list (not the copy held in analysisPayroll) so the modal
+  // reflects a lock/unlock immediately.
+  const analysisIsLocked = analysisPayroll ? !!payrolls.find(p => p.id === analysisPayroll.id)?.is_locked : false;
+
   const monthOptions = Array.from({ length: 12 }, (_, i) => ({ value: String(i + 1), label: getMonthName(i + 1) }));
   const yearOptions = [2024, 2025, 2026, 2027].map(y => ({ value: String(y), label: String(y) }));
 
@@ -1140,6 +1204,14 @@ export function Payroll() {
                           >
                             V{payroll.version || 1}
                           </span>
+                          {payroll.is_locked && (
+                            <span
+                              className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                              title={`Locked${payroll.locked_at ? ' on ' + new Date(payroll.locked_at).toLocaleString('en-IN') : ''}${payroll.locked_by ? ' by ' + payroll.locked_by : ''}`}
+                            >
+                              <Lock size={10} /> Locked
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td className="py-3 px-4">
@@ -1180,9 +1252,18 @@ export function Payroll() {
                             <FileSpreadsheet size={16} />
                           </button>
                           <button
+                            onClick={() => togglePayrollLock(payroll)}
+                            disabled={lockingPayrollId === payroll.id}
+                            className={`p-1.5 rounded-lg transition-colors disabled:opacity-50 ${payroll.is_locked ? 'text-amber-600 hover:text-amber-700 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-900/30' : 'text-slate-400 hover:text-amber-600 dark:hover:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30'}`}
+                            title={payroll.is_locked ? 'Locked — click to unlock' : 'Lock payroll (freeze its values)'}
+                          >
+                            {payroll.is_locked ? <Lock size={16} /> : <Unlock size={16} />}
+                          </button>
+                          <button
                             onClick={() => deletePayroll(payroll)}
-                            className="p-1.5 text-slate-400 hover:text-red-600 dark:hover:text-red-400 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors"
-                            title="Delete payroll"
+                            disabled={!!payroll.is_locked}
+                            className={`p-1.5 rounded-lg transition-colors ${payroll.is_locked ? 'text-slate-300 dark:text-slate-600 cursor-not-allowed' : 'text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30'}`}
+                            title={payroll.is_locked ? 'Locked payrolls cannot be deleted — unlock first' : 'Delete payroll'}
                           >
                             <Trash2 size={16} />
                           </button>
@@ -1220,7 +1301,8 @@ export function Payroll() {
                             year={payroll.year}
                             payrollId={payroll.id}
                             onStatusChange={() => loadPayrollItems(payroll.id)}
-                            onEdit={(item) => {
+                            locked={!!payroll.is_locked}
+                            onEdit={payroll.is_locked ? undefined : (item) => {
                               setEditingItem(item);
                               setSundayInput(String(item.sunday_work_days || 0));
                               setBonusInput(String(item.bonus || 0));
@@ -1245,7 +1327,13 @@ export function Payroll() {
         size="lg"
         footer={
           <div className="flex justify-between items-center w-full">
-            <Button variant="outline" onClick={handleRefreshPayroll} disabled={refreshing} className="gap-2 text-indigo-600 border-indigo-200 hover:bg-indigo-50">
+            <Button
+              variant="outline"
+              onClick={handleRefreshPayroll}
+              disabled={refreshing || !!analysisIsLocked}
+              title={analysisIsLocked ? 'Locked — unlock this payroll to refresh' : undefined}
+              className="gap-2 text-indigo-600 border-indigo-200 hover:bg-indigo-50"
+            >
               <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />
               {refreshing ? 'Refreshing...' : 'Refresh External Data'}
             </Button>
@@ -1259,6 +1347,12 @@ export function Payroll() {
           <div className="p-5"><TableSkeleton rows={4} cols={7} /></div>
         ) : (
           <div className="space-y-3">
+            {analysisIsLocked && (
+              <div className="flex items-center gap-2 text-xs px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 dark:bg-amber-900/20 dark:border-amber-800 dark:text-amber-400">
+                <Lock size={14} />
+                <span>This payroll is <b>locked</b>. These values are frozen and won't change when attendance, leaves, timesheets, holidays or settings change. Unlock it from Payroll History to edit or refresh.</span>
+              </div>
+            )}
             <p className="text-xs text-slate-500 dark:text-slate-400">This view shows the LMS leave record and whether the employee submitted their timesheet for the selected payroll month.</p>
             <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
               <table className="w-full text-xs">
@@ -1281,7 +1375,7 @@ export function Payroll() {
                       <td className="py-2 px-3 text-slate-500 dark:text-slate-400">{item.timesheet_status || 'Unknown'}</td>
                       <td className="py-2 px-3 text-slate-600 dark:text-slate-300">
                         <button
-                          onClick={() => setMissingDatesModal({ name: item.employee?.name || 'Employee', dates: (item as any).missing_dates || [] })}
+                          onClick={() => setMissingDatesModal({ name: item.employee?.name || 'Employee', dates: (item as any).missing_dates || [], unapproved: (item as any).timesheet_unapproved_dates || [] })}
                           className="text-left underline text-slate-600 dark:text-slate-300"
                           title="View missing timesheet dates"
                         >
@@ -1334,6 +1428,9 @@ export function Payroll() {
                         )}
                       </td>
                       <td className="py-2 px-3">
+                        {analysisIsLocked ? (
+                          <span className="text-amber-500" title="Locked"><Lock size={14} /></span>
+                        ) : (
                         <button
                           onClick={() => {
                             setEditingItem(item);
@@ -1346,6 +1443,7 @@ export function Payroll() {
                         >
                           <Edit2 size={14} />
                         </button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -1371,7 +1469,12 @@ export function Payroll() {
           {missingDatesModal && missingDatesModal.dates.length > 0 ? (
             <ul className="list-disc list-inside text-sm">
               {missingDatesModal.dates.map(d => (
-                <li key={d} className="py-1">{new Date(d).toLocaleDateString('en-IN')}</li>
+                <li key={d} className="py-1">
+                  {new Date(d).toLocaleDateString('en-IN')}
+                  {(missingDatesModal.unapproved || []).includes(d)
+                    ? <span className="ml-2 text-xs font-medium text-amber-600 dark:text-amber-400">— submitted, not approved</span>
+                    : (missingDatesModal.unapproved !== undefined && <span className="ml-2 text-xs text-slate-400">— TS missing</span>)}
+                </li>
               ))}
             </ul>
           ) : (
@@ -1576,7 +1679,7 @@ export function Payroll() {
   );
 }
 
-function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onStatusChange }: { items: PayrollItemWithEmployee[]; loading: boolean; onEdit?: (item: any) => void; month?: number; year?: number; payrollId?: string; onStatusChange?: () => void }) {
+function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onStatusChange, locked = false }: { items: PayrollItemWithEmployee[]; loading: boolean; onEdit?: (item: any) => void; month?: number; year?: number; payrollId?: string; onStatusChange?: () => void; locked?: boolean }) {
   const { showToast } = useToast();
   const [showDetails, setShowDetails] = useState(false);
   const [expandedItemId, setExpandedItemId] = useState<string | null>(null);
@@ -1598,6 +1701,10 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
   const [savingMissingPunchException, setSavingMissingPunchException] = useState(false);
 
   function openExceptionModal(item: PayrollItemWithEmployee) {
+    if (locked) {
+      showToast('error', 'This payroll is locked. Unlock it before changing exceptions.');
+      return;
+    }
     const currentType = ((item as any).timesheet_exception_type as string) || 'none';
     setExceptionType(currentType === 'partial' ? 'partial' : 'full');
     setExceptionDaysInput(currentType === 'partial' ? String((item as any).timesheet_exception_days || '') : '');
@@ -1673,6 +1780,10 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
 
   // --- Missing Punch Exception (per-date checkboxes) ---
   function openMissingPunchExceptionModal(item: PayrollItemWithEmployee) {
+    if (locked) {
+      showToast('error', 'This payroll is locked. Unlock it before changing exceptions.');
+      return;
+    }
     const alreadyExcepted: string[] = (item as any).missing_punch_exception_dates || [];
     setMissingPunchExceptionSelectedDates(new Set(alreadyExcepted));
     setMissingPunchExceptionNoteInput((item as any).missing_punch_exception_note || '');
@@ -2161,7 +2272,12 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                               </div>
                             )}
                             {finalMissingDates.length > 0
-                              ? finalMissingDates.map((d: string) => <div key={d} className="text-red-700 dark:text-red-300">{fmt(d)}</div>)
+                              ? finalMissingDates.map((d: string) => (
+                                  <div key={d} className="text-red-700 dark:text-red-300">
+                                    {fmt(d)}
+                                    {((item as any).timesheet_unapproved_dates || []).includes(d) && <span className="ml-1 text-[10px] font-medium text-amber-600 dark:text-amber-400">(TS not approved)</span>}
+                                  </div>
+                                ))
                               : item.missing_timesheets === 0
                                 ? <div className="text-green-600 italic">None — ₹0 deducted ✓</div>
                                 : <div className="text-red-500 italic">{item.missing_timesheets} day(s)</div>

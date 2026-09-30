@@ -86,6 +86,39 @@ export const payrollPool = createPool(payrollUrl);
 const lmsPool = lmsUrl ? createPool(lmsUrl) : null;
 const timesheetPool = timesheetUrl ? createPool(timesheetUrl) : null;
 
+// ─── Timesheet Approval Requirement ───────────────────────────────────────────
+// Admin setting (Settings → Payroll Rules → "Timesheet approval required", stored in the
+// `settings` table under key `timesheet_approval_required`).
+//   OFF (default) → a day counts as worked as soon as a timesheet is submitted (old behaviour).
+//   ON            → a day counts as worked ONLY if that day's timesheet is approved by the
+//                   manager OR the admin (either one is enough). Submitted-but-unapproved days
+//                   are treated exactly like missing timesheet days (LOP) and are also reported
+//                   separately as "not approved" so the UI can label them.
+async function isTimesheetApprovalRequired(client: any): Promise<boolean> {
+  try {
+    const r = await client.query(`SELECT value FROM settings WHERE key = 'timesheet_approval_required'`);
+    const v = String(r.rows[0]?.value ?? '').trim().toLowerCase();
+    return v === 'true' || v === '1' || v === 'yes' || v === 'on';
+  } catch (err: any) {
+    console.warn('[TS-APPROVAL] Could not read timesheet_approval_required setting, defaulting to OFF:', err?.message);
+    return false;
+  }
+}
+
+// One time_entries row counts as "approved" when the manager OR the admin approved it.
+// Same signals the Daily Analysis page already uses:
+//   manager → manager_approved = true  OR manager_approved_at set
+//   admin   → status = 'Approved'      OR approved_at / approved_by set
+// Column reads go through to_jsonb() so this never errors if a column is absent in the
+// Timestrap DB (a missing column simply reads as NULL).
+const TS_ENTRY_APPROVED_SQL = `(
+  LOWER(COALESCE(to_jsonb(te)->>'manager_approved', '')) IN ('true', 't', '1')
+  OR NULLIF(to_jsonb(te)->>'manager_approved_at', '') IS NOT NULL
+  OR LOWER(COALESCE(to_jsonb(te)->>'status', '')) = 'approved'
+  OR NULLIF(to_jsonb(te)->>'approved_at', '') IS NOT NULL
+  OR NULLIF(to_jsonb(te)->>'approved_by', '') IS NOT NULL
+)`;
+
 async function fetchIclockToken() {
   const authUrl = process.env.ILOCK_API_AUTH_URL || 'http://127.0.0.1:8000/api-token-auth/';
   const username = process.env.ILOCK_API_USERNAME;
@@ -120,6 +153,90 @@ async function getIclockToken() {
 }
 
 const router = Router();
+
+// ─── Payroll Lock ─────────────────────────────────────────────────────────────
+// A generated payroll can be LOCKED. Locking captures a snapshot of exactly what the
+// analysis view shows at that moment; from then on the analysis endpoint serves that
+// snapshot instead of recalculating live from LMS / timesheets / attendance /
+// holidays / employee data, and every route that edits payroll items refuses to run.
+const PAYROLL_LOCK_SETUP_SQL = `
+  ALTER TABLE payrolls ADD COLUMN IF NOT EXISTS is_locked boolean NOT NULL DEFAULT false;
+  ALTER TABLE payrolls ADD COLUMN IF NOT EXISTS locked_at timestamptz;
+  ALTER TABLE payrolls ADD COLUMN IF NOT EXISTS locked_by text;
+
+  CREATE TABLE IF NOT EXISTS payroll_lock_snapshots (
+    payroll_id uuid PRIMARY KEY REFERENCES payrolls(id) ON DELETE CASCADE,
+    snapshot jsonb NOT NULL,
+    created_at timestamptz DEFAULT now()
+  );
+
+  CREATE OR REPLACE FUNCTION prevent_locked_payroll_item_change() RETURNS trigger AS $fn$
+  BEGIN
+    IF EXISTS (SELECT 1 FROM payrolls WHERE id = OLD.payroll_id AND is_locked = true) THEN
+      RAISE EXCEPTION 'Payroll is locked. Unlock it before changing its items.' USING ERRCODE = 'P0423';
+    END IF;
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+  END;
+  $fn$ LANGUAGE plpgsql;
+
+  DROP TRIGGER IF EXISTS trg_payroll_items_locked_guard ON payroll_items;
+  CREATE TRIGGER trg_payroll_items_locked_guard
+    BEFORE UPDATE OR DELETE ON payroll_items
+    FOR EACH ROW EXECUTE FUNCTION prevent_locked_payroll_item_change();
+
+  CREATE OR REPLACE FUNCTION prevent_locked_payroll_delete() RETURNS trigger AS $fn$
+  BEGIN
+    IF OLD.is_locked = true THEN
+      RAISE EXCEPTION 'Payroll is locked. Unlock it before deleting.' USING ERRCODE = 'P0423';
+    END IF;
+    RETURN OLD;
+  END;
+  $fn$ LANGUAGE plpgsql;
+
+  DROP TRIGGER IF EXISTS trg_payrolls_locked_delete_guard ON payrolls;
+  CREATE TRIGGER trg_payrolls_locked_delete_guard
+    BEFORE DELETE ON payrolls
+    FOR EACH ROW EXECUTE FUNCTION prevent_locked_payroll_delete();
+`;
+
+// Runs once when the API starts. Every statement is idempotent, so a payroll database
+// that already has the lock columns is left untouched. The promise is awaited by the
+// lock routes so they never run before the columns exist.
+const payrollLockSetupPromise: Promise<void> = (async () => {
+  try {
+    await payrollPool.query(PAYROLL_LOCK_SETUP_SQL);
+    console.log('[LOCK] Payroll lock columns/triggers are ready.');
+  } catch (err) {
+    console.error('[LOCK] Could not set up payroll lock columns/triggers:', err);
+  }
+})();
+
+// Returns true when the payroll that owns this payroll item is locked.
+async function isPayrollItemLocked(client: any, payrollItemId: string): Promise<boolean> {
+  await payrollLockSetupPromise;
+  const r = await client.query(
+    `SELECT p.is_locked
+       FROM payroll_items pi
+       JOIN payrolls p ON p.id = pi.payroll_id
+      WHERE pi.id = $1`,
+    [payrollItemId]
+  );
+  return r.rows[0]?.is_locked === true;
+}
+
+const PAYROLL_LOCKED_MESSAGE = 'This payroll is locked. Unlock it before making changes.';
+
+async function writeLockAuditLog(action: string, payrollId: string, details: Record<string, unknown>, userEmail?: string | null) {
+  try {
+    await payrollPool.query(
+      `INSERT INTO audit_logs (action, entity, entity_id, details, user_email) VALUES ($1, 'payrolls', $2, $3, COALESCE($4, 'admin@company.com'))`,
+      [action, payrollId, JSON.stringify(details), userEmail || null]
+    );
+  } catch (err) {
+    console.warn('[LOCK] Could not write audit log:', err instanceof Error ? err.message : err);
+  }
+}
 
 // ─── Department Routes ────────────────────────────────────────────────────────
 
@@ -1743,7 +1860,7 @@ router.post('/payroll-items/external-data', async (req, res) => {
   const { employeeIds, month, year } = req.body;
 
   const leaveMap: Record<string, { employee_id: string; unpaid_leaves: number; total_leaves: number; paid_leaves: number; leave_type: string; leave_dates: string[]; pa_sla_consumed?: number; od_dates?: string[]; permission_hours?: number; dates?: string[] }> = {};
-  const timesheetMap: Record<string, { employee_id: string; missing_days: number; submitted_at: string | null; missing_dates: string[]; excluded_dates?: string[]; holiday_dates?: string[] }> = {};
+  const timesheetMap: Record<string, { employee_id: string; missing_days: number; submitted_at: string | null; missing_dates: string[]; unapproved_dates?: string[]; excluded_dates?: string[]; holiday_dates?: string[] }> = {};
 
   let pClient, lmsClient, timesheetClient;
 
@@ -1810,11 +1927,22 @@ router.post('/payroll-items/external-data', async (req, res) => {
             let totalCount = 0;
             const leaveTypeSummary: string[] = [];
 
+            // Holidays that apply to this employee (all-department ones + their own department's).
+            // A leave record covering a holiday date is not a leave day — holidays are paid for
+            // everyone, including employees on probation.
+            const leaveEmpDept = (emp.department || '').toLowerCase().trim();
+            const leaveHolidaySet = new Set<string>(
+              allHolidays
+                .filter(h => !h.applicable_departments || h.applicable_departments.length === 0 || h.applicable_departments.map(x => x.toLowerCase().trim()).includes(leaveEmpDept))
+                .map(h => h.date)
+            );
+
             for (const row of leaveRes.rows) {
               const dt = new Date(row.leave_date);
               const d = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
               const dayValue = row.leave_duration_type === 'Half Day' ? 0.5 : 1.0;
               allLeaveDates.push(d);
+              if (leaveHolidaySet.has(d)) continue; // holiday — paid for all, not a leave day
               totalCount += dayValue;
               leaveTypeSummary.push(row.leave_type);
 
@@ -1928,12 +2056,20 @@ router.post('/payroll-items/external-data', async (req, res) => {
       const codes = Array.from(new Set(candidateMap.flatMap((c: any) => c.codes)));
       console.log(`[EXTERNAL-DATA] Searching for codes: ${JSON.stringify(codes)}`);
 
+      // Admin setting: when ON, only days whose timesheet is approved (manager OR admin) count as worked.
+      const timesheetApprovalRequired = await isTimesheetApprovalRequired(pClient);
       const tsRes = await timesheetClient.query(
-        `SELECT employee_code, ARRAY_AGG(DISTINCT CAST(date as date)) as worked_dates 
-         FROM time_entries 
-         WHERE UPPER(employee_code) = ANY($1) AND EXTRACT(MONTH FROM CAST(date as date)) = $2 AND EXTRACT(YEAR FROM CAST(date as date)) = $3
-           AND LOWER(status) NOT IN ('draft', 'rejected')
-         GROUP BY employee_code`,
+        `SELECT x.employee_code,
+                ARRAY_AGG(x.d) AS submitted_dates,
+                ARRAY_AGG(x.d) FILTER (WHERE x.approved) AS approved_dates
+         FROM (
+           SELECT te.employee_code, CAST(te.date AS date) AS d, BOOL_AND(${TS_ENTRY_APPROVED_SQL}) AS approved
+           FROM time_entries te
+           WHERE UPPER(te.employee_code) = ANY($1) AND EXTRACT(MONTH FROM CAST(te.date as date)) = $2 AND EXTRACT(YEAR FROM CAST(te.date as date)) = $3
+             AND LOWER(te.status) NOT IN ('draft', 'rejected')
+           GROUP BY te.employee_code, CAST(te.date AS date)
+         ) x
+         GROUP BY x.employee_code`,
         [codes, month, year]
       );
 
@@ -1946,11 +2082,14 @@ router.post('/payroll-items/external-data', async (req, res) => {
         const emp = empMatch?.emp;
 
         if (emp) {
-          const workedDates = (row.worked_dates || []).map((d: Date | string) => {
+          const toYmd = (d: Date | string) => {
             const dt = new Date(d);
             return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
-          });
-          const workedDatesSet = new Set(workedDates);
+          };
+          const submittedDatesSet = new Set<string>((row.submitted_dates || []).map(toYmd));
+          const approvedDatesSet = new Set<string>((row.approved_dates || []).map(toYmd));
+          // Approval ON → only approved days count as worked. OFF → any submitted day counts (unchanged).
+          const workedDatesSet = timesheetApprovalRequired ? approvedDatesSet : submittedDatesSet;
 
           // Determine which holidays apply to this employee based on their department
           const empDept = (emp.department || '').toLowerCase().trim();
@@ -1975,6 +2114,9 @@ router.post('/payroll-items/external-data', async (req, res) => {
           const leaveDateSet = new Set(empLeaves?.leave_dates || []);
           const excludedDates = rawMissingDates.filter(d => leaveDateSet.has(d));
           const actualMissingDates = rawMissingDates.filter(d => !leaveDateSet.has(d));
+          const unapprovedDates = timesheetApprovalRequired
+            ? actualMissingDates.filter(d => submittedDatesSet.has(d))
+            : [];
 
           const missing = actualMissingDates.length;
 
@@ -1985,6 +2127,7 @@ router.post('/payroll-items/external-data', async (req, res) => {
             employee_id: emp.id,
             missing_days: missing,
             missing_dates: actualMissingDates,
+            unapproved_dates: unapprovedDates,
             excluded_dates: excludedDates,
             holiday_dates: empHolidays,
             submitted_at: new Date().toISOString()
@@ -2304,8 +2447,13 @@ router.get('/attendance/leaves', async (req, res) => {
   }
 });
 
-router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
+// Named (instead of an inline route callback) so the lock route can run the exact same
+// live calculation once, at lock time, to capture the snapshot.
+const payrollAnalysisHandler = async (req: any, res: any) => {
   const { payrollId } = req.params;
+  // Only the lock route sets this: it needs the LIVE figures to snapshot, even though the
+  // payroll is not locked yet. Normal requests never can.
+  const forceLive = req.__forceLive === true;
 
   // Explicitly typed (rather than inferred) because these are now read inside the nested
   // async closure passed to Promise.all/.map() below — TS can't narrow an inferred-any
@@ -2315,6 +2463,37 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
 
   try {
     payrollClient = await payrollPool.connect();
+
+    // LOCKED payroll: serve the frozen snapshot captured when it was locked. Nothing is
+    // recalculated, so later changes to settings, holidays, LMS leaves, timesheets,
+    // attendance or employee records can never alter this payroll's figures.
+    if (!forceLive) {
+      await payrollLockSetupPromise;
+      const lockRes = await payrollClient.query(
+        `SELECT p.is_locked, s.snapshot
+           FROM payrolls p
+           LEFT JOIN payroll_lock_snapshots s ON s.payroll_id = p.id
+          WHERE p.id = $1`,
+        [payrollId]
+      );
+      const lockRow = lockRes.rows[0];
+      if (lockRow?.is_locked && Array.isArray(lockRow.snapshot)) {
+        // Hold / release is a status action (not a figure), so keep the payslip status live.
+        const statusRes = await payrollClient.query(
+          `SELECT ps.payroll_item_id, ps.status, ps.hold_reason FROM payslips ps WHERE ps.payroll_id = $1`,
+          [payrollId]
+        );
+        const statusByItem = new Map<string, any>(statusRes.rows.map((r: any) => [r.payroll_item_id, r]));
+        const frozen = lockRow.snapshot.map((row: any) => {
+          const live = statusByItem.get(row.id);
+          return live
+            ? { ...row, payslip_status: live.status ?? null, payslip_hold_reason: live.hold_reason ?? null }
+            : row;
+        });
+        return res.json(frozen);
+      }
+    }
+
     lmsClient = lmsPool ? await lmsPool.connect() : null;
     timesheetClient = timesheetPool ? await timesheetPool.connect() : null;
 
@@ -2342,6 +2521,9 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
     if (!payroll) {
       return res.status(404).json({ error: 'Payroll not found' });
     }
+
+    // Admin setting: when ON, a timesheet day only counts if approved (manager OR admin).
+    const timesheetApprovalRequired = await isTimesheetApprovalRequired(payrollClient);
 
     // Fetch holidays for the month to accurately compute missing days
     const holidayRes = await payrollClient.query(
@@ -2393,7 +2575,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
     const enriched = await mapWithConcurrency(itemsResult.rows as (PayrollItemAnalysisRow & { monthly_salary: number })[], ANALYSIS_CONCURRENCY, async (item) => {
       const monthlySalary = item.monthly_salary || 0;
       let leaveData: { unpaid_leaves?: number; leave_type?: string; leave_dates?: string[]; od_dates?: string[]; permission_hours?: number } | null = null;
-      let tsData: { missing_days?: number; submitted_at?: string | null; missing_dates?: string[]; excluded_dates?: string[] } | null = null;
+      let tsData: { missing_days?: number; submitted_at?: string | null; missing_dates?: string[]; unapproved_dates?: string[]; excluded_dates?: string[] } | null = null;
 
       // If this employee's joining date falls within the payroll month, don't
       // count any day before it as a missing timesheet/punch day — they simply
@@ -2468,6 +2650,11 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
               const d = toLocalDateStr(row.leave_date);
               const dayValue = row.leave_duration_type === 'Half Day' ? 0.5 : 1.0;
               allLeaveDates.push(d);
+              // A company/government holiday is paid for EVERYONE (probation included). A leave
+              // record that happens to cover a holiday date must not be counted as leave, must not
+              // become "unpaid" for someone with no PL/SL balance, and must not eat PL/SL balance.
+              // (The date stays in allLeaveDates so the other date-based checks behave as before.)
+              if (holidaySet.has(d)) continue;
               leaveTypeSummary.push(row.leave_type);
               if (row.leave_duration_type === 'Half Day') {
                 halfDayLeaveDates.push(d);
@@ -2592,17 +2779,25 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
             // No code at all — cannot look up → fall back to stored DB values unchanged
             tsData = null;
           } else {
+            // `approved` = every (non-draft / non-rejected) entry of that day is approved by the
+            // manager OR the admin. Only consulted when the "timesheet approval required"
+            // setting is ON; with it OFF, any submitted day counts as worked (unchanged).
             const tsRes = await timesheetPool!.query(
-              `SELECT DISTINCT CAST(date AS date) AS d
-               FROM time_entries
-               WHERE UPPER(employee_code) = ANY($1) AND EXTRACT(MONTH FROM CAST(date as date)) = $2 AND EXTRACT(YEAR FROM CAST(date as date)) = $3
-                 AND LOWER(status) NOT IN ('draft', 'rejected')`,
+              `SELECT CAST(te.date AS date) AS d, BOOL_AND(${TS_ENTRY_APPROVED_SQL}) AS approved
+               FROM time_entries te
+               WHERE UPPER(te.employee_code) = ANY($1) AND EXTRACT(MONTH FROM CAST(te.date as date)) = $2 AND EXTRACT(YEAR FROM CAST(te.date as date)) = $3
+                 AND LOWER(te.status) NOT IN ('draft', 'rejected')
+               GROUP BY CAST(te.date AS date)`,
               [lookupCodes, payroll.month, payroll.year]
             );
 
             if (tsRes.rows.length > 0) {
               // Employee has submitted some timesheet entries — compute missing days normally
-              const workedDatesSet = new Set(tsRes.rows.map((r: any) => toLocalDateStr(r.d)));
+              const submittedDatesSet = new Set(tsRes.rows.map((r: any) => toLocalDateStr(r.d)));
+              const approvedDatesSet = new Set(tsRes.rows.filter((r: any) => r.approved === true).map((r: any) => toLocalDateStr(r.d)));
+              // Approval ON → only approved days count as worked. OFF → any submitted day counts.
+              const workedDatesSet = timesheetApprovalRequired ? approvedDatesSet : submittedDatesSet;
+              const notApprovedDates: string[] = [];
               for (let d = 1; d <= calendarDays; d++) {
                 const dt = new Date(payroll.year, payroll.month - 1, d);
                 const dstr = `${payroll.year}-${String(payroll.month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
@@ -2610,12 +2805,16 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
                 if (holidaySet.has(dstr)) continue;
                 if (joiningDateStr && dstr < joiningDateStr) continue; // not employed yet
                 if (relievingDateStr && dstr > relievingDateStr) continue; // already relieved
-                if (!workedDatesSet.has(dstr)) missingDates.push(dstr);
+                if (!workedDatesSet.has(dstr)) {
+                  missingDates.push(dstr);
+                  if (timesheetApprovalRequired && submittedDatesSet.has(dstr)) notApprovedDates.push(dstr);
+                }
               }
-              console.log(`[ANALYSIS] ✅ Found ${tsRes.rows.length} worked days for ${item.employee_name}, missing ${missingDates.length}`);
+              console.log(`[ANALYSIS] ✅ Found ${tsRes.rows.length} submitted days for ${item.employee_name}, missing ${missingDates.length}${timesheetApprovalRequired ? ` (of which ${notApprovedDates.length} submitted but not approved)` : ''}`);
               tsData = {
                 missing_days: missingDates.length,
                 missing_dates: missingDates,
+                unapproved_dates: notApprovedDates,
                 submitted_at: new Date().toISOString()
               };
             } else {
@@ -2654,6 +2853,7 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
       let actualMissingDates: string[];
       let actualMissingTsDays: number;
       let finalExcludedDates: string[];
+      let unapprovedMissingDates: string[] = [];
       let timesheetDeduction: number;
 
       if (tsData !== null && tsData.missing_dates) {
@@ -2663,6 +2863,10 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
         actualMissingDates = rawMissingDates.filter((d: string) => !leaveDateSet.has(d));
         actualMissingTsDays = actualMissingDates.length;
         finalExcludedDates = excludedByLeave;
+        // Of the days that are still deductible, which ones were actually submitted but not approved
+        // (only ever non-empty when the approval-required setting is ON).
+        const unapprovedSet = new Set(tsData.unapproved_dates || []);
+        unapprovedMissingDates = actualMissingDates.filter((d: string) => unapprovedSet.has(d));
 
         timesheetDeduction = Math.round(
           ((monthlySalary || 0) / (calendarDays || 30)) * actualMissingTsDays * 100
@@ -2949,8 +3153,17 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
         hourly_deduction: Number(item.hourly_deduction) || 0,
         previous_month_balance: previousMonthBalance,
         net_salary: netSalary,
-        timesheet_status: tsData?.submitted_at ? 'Submitted' : 'Not submitted',
+        timesheet_status: !tsData?.submitted_at
+          ? 'Not submitted'
+          : (timesheetApprovalRequired && unapprovedMissingDates.length > 0
+              ? `Submitted (${unapprovedMissingDates.length} day${unapprovedMissingDates.length === 1 ? '' : 's'} not approved)`
+              : 'Submitted'),
         timesheet_submitted_at: tsData?.submitted_at || null,
+        // Days the employee submitted a timesheet but it is not approved (manager or admin) yet.
+        // These are ALSO included in missing_dates / missing_timesheets and deducted as LOP when
+        // the approval-required setting is ON. Always [] when the setting is OFF.
+        timesheet_unapproved_dates: unapprovedMissingDates,
+        timesheet_approval_required: timesheetApprovalRequired,
         timesheet_excluded_dates: finalExcludedDates,
         holiday_dates: finalHolidayDates,
         leave_dates: leaveDatesArray,
@@ -2966,6 +3179,99 @@ router.get('/payroll-items/analysis/:payrollId', async (req, res) => {
     if (payrollClient) payrollClient.release();
     if (lmsClient) lmsClient.release();
     if (timesheetClient) timesheetClient.release();
+  }
+};
+
+router.get('/payroll-items/analysis/:payrollId', payrollAnalysisHandler);
+
+// ─── Lock / Unlock a generated payroll ────────────────────────────────────────
+router.post('/payroll/:id/lock', async (req, res) => {
+  const { id } = req.params;
+  const lockedBy: string | null = (req.body && typeof req.body.locked_by === 'string' && req.body.locked_by.trim()) || null;
+
+  let client: any;
+  try {
+    await payrollLockSetupPromise;
+    client = await payrollPool.connect();
+
+    const existing = await client.query('SELECT id, is_locked, month, year FROM payrolls WHERE id = $1', [id]);
+    if (existing.rows.length === 0) return res.status(404).json({ error: 'Payroll not found' });
+    if (existing.rows[0].is_locked) return res.json({ success: true, alreadyLocked: true });
+
+    // Capture the live figures exactly as the analysis screen shows them right now.
+    let captured: { status: number; body: any } = { status: 200, body: null };
+    const fakeRes: any = {
+      status(code: number) { captured.status = code; return this; },
+      json(body: any) { captured.body = body; return this; },
+    };
+    await payrollAnalysisHandler({ params: { payrollId: id }, __forceLive: true }, fakeRes);
+
+    if (captured.status !== 200 || !Array.isArray(captured.body)) {
+      console.error('[LOCK] Could not capture snapshot:', captured);
+      return res.status(500).json({ error: 'Could not capture the payroll figures, so the payroll was NOT locked. Please try again.' });
+    }
+
+    const snapshot = captured.body as any[];
+    const total = snapshot.reduce((sum, r) => sum + (Number(r.net_salary) || 0), 0);
+
+    await client.query('BEGIN');
+    try {
+      await client.query(
+        `INSERT INTO payroll_lock_snapshots (payroll_id, snapshot) VALUES ($1, $2)
+         ON CONFLICT (payroll_id) DO UPDATE SET snapshot = EXCLUDED.snapshot, created_at = now()`,
+        [id, JSON.stringify(snapshot)]
+      );
+      await client.query(
+        `UPDATE payrolls SET is_locked = true, locked_at = now(), locked_by = $2, total_amount = $3 WHERE id = $1`,
+        [id, lockedBy, Math.round(total * 100) / 100]
+      );
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK');
+      throw txErr;
+    }
+
+    await writeLockAuditLog('LOCK_PAYROLL', id, { month: existing.rows[0].month, year: existing.rows[0].year, employee_count: snapshot.length, total_amount: total }, lockedBy);
+    const after = await client.query('SELECT is_locked, locked_at, locked_by, total_amount FROM payrolls WHERE id = $1', [id]);
+    res.json({ success: true, ...after.rows[0] });
+  } catch (err) {
+    console.error('Error locking payroll:', err);
+    res.status(500).json({ error: 'Failed to lock payroll' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+router.post('/payroll/:id/unlock', async (req, res) => {
+  const { id } = req.params;
+  const unlockedBy: string | null = (req.body && typeof req.body.unlocked_by === 'string' && req.body.unlocked_by.trim()) || null;
+
+  let client: any;
+  try {
+    await payrollLockSetupPromise;
+    client = await payrollPool.connect();
+
+    const existing = await client.query('SELECT id, is_locked, month, year FROM payrolls WHERE id = $1', [id]);
+    if (existing.rows.length === 0) return res.status(404).json({ error: 'Payroll not found' });
+    if (!existing.rows[0].is_locked) return res.json({ success: true, alreadyUnlocked: true });
+
+    await client.query('BEGIN');
+    try {
+      await client.query('UPDATE payrolls SET is_locked = false, locked_at = NULL, locked_by = NULL WHERE id = $1', [id]);
+      await client.query('DELETE FROM payroll_lock_snapshots WHERE payroll_id = $1', [id]);
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK');
+      throw txErr;
+    }
+
+    await writeLockAuditLog('UNLOCK_PAYROLL', id, { month: existing.rows[0].month, year: existing.rows[0].year }, unlockedBy);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error unlocking payroll:', err);
+    res.status(500).json({ error: 'Failed to unlock payroll' });
+  } finally {
+    if (client) client.release();
   }
 });
 
@@ -2993,6 +3299,10 @@ router.patch('/payroll-items/:id', async (req, res) => {
   let client;
   try {
     client = await payrollPool.connect();
+
+    if (await isPayrollItemLocked(client, id)) {
+      return res.status(423).json({ error: PAYROLL_LOCKED_MESSAGE });
+    }
 
     // Fetch the payroll item AND the payroll month/year to compute calendar days
     const currentRes = await client.query(
@@ -3123,6 +3433,10 @@ router.patch('/payroll-items/:id/timesheet-exception', async (req, res) => {
   try {
     client = await payrollPool.connect();
 
+    if (await isPayrollItemLocked(client, id)) {
+      return res.status(423).json({ error: PAYROLL_LOCKED_MESSAGE });
+    }
+
     const currentRes = await client.query(
       `SELECT pi.*, p.month, p.year
        FROM payroll_items pi
@@ -3236,6 +3550,10 @@ router.patch('/payroll-items/:id/missing-punch-exception', async (req, res) => {
   let client;
   try {
     client = await payrollPool.connect();
+
+    if (await isPayrollItemLocked(client, id)) {
+      return res.status(423).json({ error: PAYROLL_LOCKED_MESSAGE });
+    }
 
     const currentRes = await client.query(
       `SELECT pi.*, p.month, p.year

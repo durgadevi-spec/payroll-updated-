@@ -12,13 +12,11 @@
 import cron from 'node-cron';
 import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
-import { Resend } from 'resend';
 
 dotenv.config({ path: './.env' });
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const payrollUrl = process.env.PAYROLL_DATABASE_URL as string;
-const lmsUrl = process.env.LMS_DATABASE_URL;
 const timesheetUrl = process.env.TIMESTRAP_DATABASE_URL || process.env.TIMESHEET_DATABASE_URL || process.env.DATABASE_URL;
 const resendApiKey = process.env.RESEND_API_KEY;
 
@@ -63,9 +61,16 @@ async function getAlertSettings(client: any): Promise<{
   const parseEmails = (val: string) =>
     val.split(',').map(e => e.trim()).filter(e => e.includes('@'));
 
+  // Only fall back to the built-in defaults when the setting was NEVER saved (no row in the
+  // settings table). If the row exists but is empty, the admin deliberately cleared it in
+  // Settings, so that list must stay empty — `||` used to treat '' as "missing" and silently
+  // re-added the default address (which is why a removed HR email kept receiving alerts).
+  const savedOrDefault = (key: string, fallback: string) =>
+    Object.prototype.hasOwnProperty.call(map, key) ? map[key] : fallback;
+
   return {
-    adminEmails: parseEmails(map.alert_admin_emails || 'sp@ctint.in,durgadevi@ctint.in'),
-    hrEmails: parseEmails(map.alert_hr_emails || 'pushpa.p@ctint.in'),
+    adminEmails: parseEmails(savedOrDefault('alert_admin_emails', 'sp@ctint.in,durgadevi@ctint.in')),
+    hrEmails: parseEmails(savedOrDefault('alert_hr_emails', 'pushpa.p@ctint.in')),
     fromEmail: map.smtp_from || map.company_email || 'onboarding@resend.dev',
     companyName: map.company_name || 'PayrollPro',
     payrollDate: parseInt(map.payroll_date || '1'),
@@ -363,7 +368,7 @@ function buildAlertEmail({ date, companyName, missingTimesheets, consecutiveAbse
   }
 
   if (discrepancies.length > 0) {
-    const rows = discrepancies.map(d =>
+    const rows = discrepancies.map((d: any) =>
       `<tr>
         <td style="padding:8px 12px;font-weight:600;color:#334155;font-size:13px;">${d.name}</td>
         <td style="padding:8px 12px;color:#0f766e;font-size:13px;">${d.biometric}</td>

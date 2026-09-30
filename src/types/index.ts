@@ -34,6 +34,9 @@ export interface Payroll {
   created_at: string;
   version?: number;
   regeneration_reason?: string | null;
+  is_locked?: boolean;
+  locked_at?: string | null;
+  locked_by?: string | null;
 }
 
 export interface PayrollItem {
