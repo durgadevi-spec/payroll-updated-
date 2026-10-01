@@ -615,32 +615,43 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                     {/* ── Hourly Attendance Shortfall Card (bottom summary) ── */}
                     {(() => {
                       const monthlySalary = emp.ctc ? Math.round(emp.ctc / 12) : 0;
-                      const totalMissing = emp.summary.totalHoursMissing || 0;
-                      const covered = emp.summary.permissionCoveredHours || 0;
+                      const punchMissing = emp.summary.totalHoursMissing || 0;
+                      const nonWorkingPerm = emp.summary.nonWorkingPermissionHours || 0;
+                      // Total chargeable time = punch shortfall + permission taken on OD/leave/holiday dates
+                      const totalMissing = punchMissing + nonWorkingPerm;
                       const deductible = emp.summary.deductibleShortfallHours || 0;
+                      // Covered = whatever the 3h monthly pool absorbed (total chargeable - what is deducted)
+                      const covered = Math.max(0, totalMissing - deductible);
                       const amount = Math.round(emp.summary.hourlyDeductionAmount || 0);
                       const allowanceUsed = parseFloat(emp.summary.monthlyAllowanceUsed || 0);
-                      const monthlyCap = 3;
+                      const onProbation = !!emp.is_on_probation;
+                      const monthlyCap = onProbation ? 0 : 3; // first 6 months: no free permission allowance
                       const lopHours = Math.max(0, deductible); // hours beyond what LMS permission / 3h allowance could cover
                       if (totalMissing <= 0) return null;
                       return (
                         <div className="mx-4 mb-5 rounded-lg border border-amber-200 dark:border-amber-900/40 bg-amber-50/40 dark:bg-amber-500/5">
                           <div className="px-4 py-2.5 border-b border-amber-200 dark:border-amber-900/40 flex items-center justify-between">
                             <span className="text-xs font-semibold text-amber-800 dark:text-amber-300">Hourly attendance shortfall (biometric &lt;9h/day)</span>
-                            <span className="text-[11px] text-amber-600 dark:text-amber-400">Monthly permission allowance: {monthlyCap}h free</span>
+                            <span className="text-[11px] text-amber-600 dark:text-amber-400">{onProbation ? 'On probation (first 6 months): no free permission allowance' : `Monthly permission allowance: ${monthlyCap}h free`}</span>
                           </div>
                           <div className="grid grid-cols-2 sm:grid-cols-4">
                             <div className="px-4 py-3 border-r border-b sm:border-b-0 border-amber-100 dark:border-amber-900/30">
-                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Total hours missing</p>
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Total used (short hours + permission)</p>
                               <p className="text-sm font-semibold text-slate-900 dark:text-white tabular-nums">{totalMissing.toFixed(1)}h</p>
+                              {nonWorkingPerm > 0 && (
+                                <p className="text-[11px] text-slate-400 mt-0.5">{punchMissing.toFixed(1)}h punch shortfall + {nonWorkingPerm.toFixed(1)}h permission on OD / leave / holiday dates</p>
+                              )}
+                              {nonWorkingPerm <= 0 && (
+                                <p className="text-[11px] text-slate-400 mt-0.5">Hours short of 9h/day on working days</p>
+                              )}
                             </div>
                             <div className="px-4 py-3 border-b sm:border-b-0 sm:border-r border-amber-100 dark:border-amber-900/30">
-                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Covered by permission / allowance</p>
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">{onProbation ? 'Free allowance (not applicable)' : `Free allowance (${monthlyCap}h / month)`}</p>
                               <p className="text-sm font-semibold text-emerald-600 dark:text-emerald-400 tabular-nums">{covered.toFixed(1)}h</p>
-                              <p className="text-[11px] text-slate-400 mt-0.5">{allowanceUsed.toFixed(1)}h of {monthlyCap}h monthly allowance used — no deduction</p>
+                              <p className="text-[11px] text-slate-400 mt-0.5">{onProbation ? 'On probation — nothing is covered, all used hours are deducted' : `${allowanceUsed.toFixed(1)}h of ${monthlyCap}h allowance used — no deduction`}</p>
                             </div>
                             <div className="px-4 py-3 border-r border-amber-100 dark:border-amber-900/30">
-                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">LOP hours (beyond 3h cap / no permission)</p>
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">{onProbation ? 'Excess hours → deducted' : `Excess beyond ${monthlyCap}h → deducted`}</p>
                               <p className={`text-sm font-semibold tabular-nums ${lopHours > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-400'}`}>{lopHours > 0 ? `${lopHours.toFixed(1)}h` : '—'}</p>
                             </div>
                             <div className="px-4 py-3 bg-red-50/60 dark:bg-red-500/5">

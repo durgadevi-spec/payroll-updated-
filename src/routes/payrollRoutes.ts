@@ -1381,6 +1381,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           approvedPermissionHours: 0,
           monthlyAllowanceUsed: 0,
           permissionLimitExceededDays: 0,
+          nonWorkingPermissionHours: 0, // LMS permission hours on OD/leave/holiday/Sunday dates (counted against the 3h pool, not part of punch shortfall)
           halfDayLeaves: 0,
           // Hourly shortfall tracking (biometric hours vs required 9h/day)
           totalHoursMissing: 0,        // gross hours short of 9h/day across all attended-but-short days
@@ -1660,71 +1661,47 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
               dedReason = (isHalfDayOD ? 'Approved Half-Day OD' : 'Approved Half-Day Leave') + ' - No Deduction';
             }
           } else {
-            if (totalHours > 0 || permHours > 0) {
-              if (eligibleHours < 9) {
-                const shortfall = 9 - eligibleHours;
-                // Probationary employees get no free monthly permission allowance —
-                // force availableAllowance to 0 so every short hour falls through
-                // to the deductible/hourly-deduction branch below.
-                const availableAllowance = isOnProbation ? 0 : (3 - empData.summary.monthlyAllowanceUsed);
-                if (availableAllowance > 0) {
-                  const totalCoverage = Math.min(shortfall, availableAllowance);
-                  allowanceUsedToday = totalCoverage;
-                  empData.summary.monthlyAllowanceUsed += totalCoverage;
-                  eligibleHours += totalCoverage;
-
-                  if (permHours > 0) {
-                    permHoursUsed = Math.min(permHours, totalCoverage);
-                  }
-                }
-              }
-            }
-
-            if (eligibleHours >= 9) {
-              paidUnpaid = 'Paid (Working)';
-              if (allowanceUsedToday > 0) {
-                dedReason = 'Within Monthly 3-Hour Permission Allowance - No Deduction';
-              } else if (permHoursUsed > 0) {
-                dedReason = 'Approved Permission - No Deduction';
-              } else {
-                dedReason = null;
-              }
+            // Rule aligned with the Knockturn "Permission Balance" card:
+            // for each day the chargeable time is the LARGER of (a) the biometric
+            // shortfall (9h - punched hours) and (b) the approved LMS permission
+            // hours on that date. The monthly 3h allowance is consumed by that
+            // chargeable time in date order; whatever is left over beyond the
+            // allowance is deducted hourly. (Probation: no free allowance.)
+            if (totalHours === 0 && permHours === 0) {
+              // User requirement: deduct salary for missing punch in & out if no LMS leave applied
+              paidUnpaid = 'Unpaid (Missing Punches)';
+              isDeductible = true;
+              dedReason = attStatus + ' (Salary Deducted)';
             } else {
-              if (totalHours === 0 && permHours === 0) {
-                // User requirement: deduct salary for missing punch in & out if no LMS leave applied
-                paidUnpaid = 'Unpaid (Missing Punches)';
-                isDeductible = true;
-                dedReason = attStatus + ' (Salary Deducted)';
-              } else {
-                // Employee was present (biometric shows some hours) but total eligible hours,
-                // after adding any approved LMS permission / monthly 3h allowance,
-                // still falls short of the required 9 hours.
-                // Requirement: deduct salary proportional to the remaining short hours (not a full day),
-                // unless the shortfall is fully covered by permission/allowance.
-                const remainingShort = Math.round((9 - eligibleHours) * 100) / 100;
-                if (remainingShort > 0.01) {
-                  deductibleShortHoursToday = remainingShort;
-                  hourlyDeductionToday = Math.round(remainingShort * perHourSalaryForDed * 100) / 100;
-                  paidUnpaid = 'Partially Paid (Hourly Deduction)';
-                  isDeductible = false; // day itself is still "attended"; deduction is hour-based, not day-based
-                  if (isOnProbation && permHours > 0) {
-                    dedReason = `${remainingShort.toFixed(2)}h short of 9h — On Probation (no free permission allowance) — Hourly Salary Deduction`;
-                  } else if (permHoursUsed === 0 && allowanceUsedToday === 0) {
-                    dedReason = `${remainingShort.toFixed(2)}h short of 9h, no LMS permission — Hourly Salary Deduction`;
-                  } else if (empData.summary.monthlyAllowanceUsed >= 3) {
-                    dedReason = `${remainingShort.toFixed(2)}h short beyond 3-Hour Monthly Permission Limit — LOP (Hourly Deduction)`;
-                  } else {
-                    dedReason = `${remainingShort.toFixed(2)}h short after permission/allowance — Hourly Salary Deduction`;
-                  }
-                  empData.summary.permissionLimitExceededDays++;
+              const shortfallToday = Math.max(0, 9 - totalHours);
+              const chargeableToday = Math.round(Math.max(shortfallToday, permHours) * 100) / 100;
+              const availableAllowance = isOnProbation ? 0 : Math.max(0, 3 - empData.summary.monthlyAllowanceUsed);
+              const covered = Math.round(Math.min(chargeableToday, availableAllowance) * 100) / 100;
+              allowanceUsedToday = covered;
+              empData.summary.monthlyAllowanceUsed += covered;
+              if (permHours > 0) permHoursUsed = Math.min(permHours, covered);
+              eligibleHours = Math.min(9, totalHours + covered);
+              const remainingCharge = Math.round((chargeableToday - covered) * 100) / 100;
+
+              if (remainingCharge > 0.01) {
+                deductibleShortHoursToday = remainingCharge;
+                hourlyDeductionToday = Math.round(remainingCharge * perHourSalaryForDed * 100) / 100;
+                paidUnpaid = 'Partially Paid (Hourly Deduction)';
+                isDeductible = false; // day is still "attended"; deduction is hour-based
+                if (isOnProbation) {
+                  dedReason = `${remainingCharge.toFixed(2)}h chargeable (short hours / permission) — On Probation (no free permission allowance) — Hourly Salary Deduction`;
+                } else if (empData.summary.monthlyAllowanceUsed >= 3) {
+                  dedReason = `${remainingCharge.toFixed(2)}h beyond 3-Hour Monthly Permission Limit — Hourly Deduction`;
                 } else {
-                  paidUnpaid = 'Paid (Missing Punches)';
-                  isDeductible = false;
-                  if (allowanceUsedToday > 0 || empData.summary.monthlyAllowanceUsed >= 3) {
-                    dedReason = 'Within Monthly 3-Hour Permission Allowance - No Deduction';
-                  } else {
-                    dedReason = attStatus + ' (No Salary Deduction)';
-                  }
+                  dedReason = `${remainingCharge.toFixed(2)}h short after permission/allowance — Hourly Salary Deduction`;
+                }
+                empData.summary.permissionLimitExceededDays++;
+              } else {
+                paidUnpaid = 'Paid (Working)';
+                if (covered > 0) {
+                  dedReason = 'Within Monthly 3-Hour Permission Allowance - No Deduction';
+                } else {
+                  dedReason = null;
                 }
               }
             }
@@ -1738,13 +1715,42 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           if (totalHours < requiredBiometricHours) {
             const rawShort = Math.round((requiredBiometricHours - totalHours) * 100) / 100;
             empData.summary.totalHoursMissing += rawShort;
-            empData.summary.deductibleShortfallHours = Math.round((empData.summary.deductibleShortfallHours + deductibleShortHoursToday) * 100) / 100;
-            empData.summary.hourlyDeductionAmount += hourlyDeductionToday;
             empData.summary.permissionCoveredHours += Math.max(0, rawShort - deductibleShortHoursToday);
           }
+          // Deductible hours / amount are rolled up for every attended day, because a
+          // day can now be charged for its LMS permission hours even when the punch
+          // shortfall is zero (Knockturn rule: max(shortfall, permission) per date).
+          empData.summary.deductibleShortfallHours = Math.round((empData.summary.deductibleShortfallHours + deductibleShortHoursToday) * 100) / 100;
+          empData.summary.hourlyDeductionAmount += hourlyDeductionToday;
           // Track excess hours (worked more than required)
           if (totalHours > requiredBiometricHours) {
             empData.summary.totalExcessHours += Math.round((totalHours - requiredBiometricHours) * 100) / 100;
+          }
+        }
+
+        // Permission taken on a day that is NOT evaluated by the working-day logic
+        // above (OD / full-day leave / holiday / Sunday) still counts against the
+        // shared 3h monthly pool. Rule: each month an employee has 3h that can be
+        // used as permission or to cover missing punch hours; anything beyond 3h is
+        // LOP (hourly deduction). Probation: no free allowance.
+        if (permHours > 0 && (isHoliday || isSunday || isFullDayLeave)) {
+          const availableAllowance = isOnProbation ? 0 : Math.max(0, 3 - empData.summary.monthlyAllowanceUsed);
+          const coveredPerm = Math.round(Math.min(permHours, availableAllowance) * 100) / 100;
+          empData.summary.nonWorkingPermissionHours = Math.round((empData.summary.nonWorkingPermissionHours + permHours) * 100) / 100;
+          allowanceUsedToday += coveredPerm;
+          empData.summary.monthlyAllowanceUsed += coveredPerm;
+          permHoursUsed += coveredPerm;
+          const lopPermHours = Math.round((permHours - coveredPerm) * 100) / 100;
+          if (lopPermHours > 0.01) {
+            const lopAmount = Math.round(lopPermHours * perHourSalaryForDed * 100) / 100;
+            deductibleShortHoursToday += lopPermHours;
+            hourlyDeductionToday += lopAmount;
+            empData.summary.deductibleShortfallHours = Math.round((empData.summary.deductibleShortfallHours + lopPermHours) * 100) / 100;
+            empData.summary.hourlyDeductionAmount += lopAmount;
+            empData.summary.permissionLimitExceededDays++;
+            dedReason = (dedReason ? dedReason + ' | ' : '') + `${lopPermHours.toFixed(2)}h permission beyond 3-Hour Monthly limit — LOP (Hourly Deduction)`;
+          } else if (coveredPerm > 0) {
+            dedReason = (dedReason ? dedReason + ' | ' : '') + 'Permission within Monthly 3-Hour Allowance - No Deduction';
           }
         }
 
