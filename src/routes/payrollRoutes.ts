@@ -1529,6 +1529,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
         let eligibleHours = totalHours;
         let halfDayHours = 0;
         let isUnpaidHalfDay = false;
+        let isHalfDayMissing = false; // worked < HALF_DAY_MIN_HOURS with no leave: flat 0.5-day deduction (not permission / hourly)
         let permHours = perm ? perm.hours : 0;
         let allowanceUsedToday = 0;
         let deductibleShortHoursToday = 0;
@@ -1607,6 +1608,9 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
           // Working Day or Half-Day Leave
           const isHalfDay = !!(leave && leave.duration && leave.duration.toLowerCase().includes('half'));
           const isHalfDayOD = isHalfDay && leave.type.toLowerCase() === 'od';
+          // Half-day Comp Off: the leave half is covered by the stored comp off (not PL/SL balance)
+          const isHalfDayCompOff = isHalfDay && leave.type.toLowerCase().trim() === 'comp off';
+          const halfLeaveLabel = isHalfDayOD ? 'Approved Half-Day OD' : (isHalfDayCompOff ? 'Approved Half-Day Comp Off' : 'Approved Half-Day Leave');
 
           if (isHalfDay) {
             // Half-Day OD / Half-Day Leave: one half of the day is covered
@@ -1626,6 +1630,16 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
 
             if (isHalfDayOD) {
               paidUnpaid = 'Paid (Half-Day OD)';
+            } else if (isHalfDayCompOff) {
+              if (leave.isCompOffUncovered) {
+                // Same rule as a full-day Comp Off: no comp off stored -> that half is deducted
+                lmsStatus = 'Approved (No Balance)';
+                leaveHalfUnpaid = true;
+                paidUnpaid = 'Unpaid Leave (Half-Day Comp Off)';
+              } else {
+                // Covered by comp off -> no deduction, PL/SL balance is NOT used
+                paidUnpaid = 'Paid Leave (Half-Day Comp Off)';
+              }
             } else if (paSlaBalance >= 0.5) {
               paSlaBalance -= 0.5;
               empData.summary.paSlaConsumed += 0.5;
@@ -1649,16 +1663,20 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
               // Both halves unpaid — full day deducted
               isDeductible = true;
               paidUnpaid = 'Unpaid (Half-Day Leave + Balance Half-Day)';
-              dedReason = 'No PL/SL Balance for Half-Day Leave and Balance Half-Day Not Worked - Full Day Deducted';
+              dedReason = isHalfDayCompOff
+                ? 'Half-Day Comp Off applied but no comp off stored for you, and Balance Half-Day Not Worked - Full Day Deducted'
+                : 'No PL/SL Balance for Half-Day Leave and Balance Half-Day Not Worked - Full Day Deducted';
             } else if (leaveHalfUnpaid) {
               isUnpaidHalfDay = true;
-              dedReason = 'No PL/SL Balance for Half-Day Leave - 0.5 Day Deducted';
+              dedReason = isHalfDayCompOff
+                ? 'Half-Day Comp Off applied but no comp off stored for you - 0.5 Day Deducted'
+                : 'No PL/SL Balance for Half-Day Leave - 0.5 Day Deducted';
             } else if (balanceHalfUnpaid) {
               isUnpaidHalfDay = true;
-              dedReason = (isHalfDayOD ? 'Approved Half-Day OD' : 'Approved Half-Day Leave') +
+              dedReason = halfLeaveLabel +
                 ' - Balance Half-Day Not Worked (Not Covered by Permission) - 0.5 Day Deducted';
             } else {
-              dedReason = (isHalfDayOD ? 'Approved Half-Day OD' : 'Approved Half-Day Leave') + ' - No Deduction';
+              dedReason = halfLeaveLabel + ' - No Deduction';
             }
           } else {
             // Rule aligned with the Knockturn "Permission Balance" card:
@@ -1667,7 +1685,18 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
             // hours on that date. The monthly 3h allowance is consumed by that
             // chargeable time in date order; whatever is left over beyond the
             // allowance is deducted hourly. (Probation: no free allowance.)
-            if (totalHours === 0 && permHours === 0) {
+            // A missing HALF DAY is a flat 0.5-day salary deduction. It never uses the
+            // monthly 3h permission allowance and is not counted in the missing/permission
+            // hours. Same convention as the half-day-leave rule above (9h - 4h half = 5h):
+            // worked less than 5h on a normal working day = half day not worked.
+            const HALF_DAY_MIN_HOURS = 5;
+            if (totalHours > 0 && totalHours < HALF_DAY_MIN_HOURS) {
+              isHalfDayMissing = true;
+              isUnpaidHalfDay = true;
+              eligibleHours = totalHours;
+              paidUnpaid = 'Partially Paid (Half Day Not Worked)';
+              dedReason = `Half day not worked (${totalHours.toFixed(1)}h < ${HALF_DAY_MIN_HOURS}h) - 0.5 Day Deducted (not counted in permission / missing hours)`;
+            } else if (totalHours === 0 && permHours === 0) {
               // User requirement: deduct salary for missing punch in & out if no LMS leave applied
               paidUnpaid = 'Unpaid (Missing Punches)';
               isDeductible = true;
@@ -1712,7 +1741,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
         const isFullDayLeave = leave && (!leave.duration || !leave.duration.toLowerCase().includes('half'));
         if (totalHours > 0 && !isSunday && !isHoliday && !isFullDayLeave) {
           const requiredBiometricHours = 9 - halfDayHours;
-          if (totalHours < requiredBiometricHours) {
+          if (totalHours < requiredBiometricHours && !isHalfDayMissing) {
             const rawShort = Math.round((requiredBiometricHours - totalHours) * 100) / 100;
             empData.summary.totalHoursMissing += rawShort;
             empData.summary.permissionCoveredHours += Math.max(0, rawShort - deductibleShortHoursToday);
@@ -1761,7 +1790,7 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
         }
 
         if (isUnpaidHalfDay) {
-          paidUnpaid = 'Partially Paid (Unpaid Half Leave)';
+          if (!isHalfDayMissing) paidUnpaid = 'Partially Paid (Unpaid Half Leave)';
           dedReason = (dedReason && !dedReason.includes('0.5 Day Deducted'))
             ? dedReason + ' | 0.5 Day Deducted'
             : (dedReason || 'Unpaid Half-Day Leave - 0.5 Day Deducted');

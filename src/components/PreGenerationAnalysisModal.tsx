@@ -617,9 +617,13 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                       const monthlySalary = emp.ctc ? Math.round(emp.ctc / 12) : 0;
                       const punchMissing = emp.summary.totalHoursMissing || 0;
                       const nonWorkingPerm = emp.summary.nonWorkingPermissionHours || 0;
-                      // Total chargeable time = punch shortfall + permission taken on OD/leave/holiday dates
-                      const totalMissing = punchMissing + nonWorkingPerm;
                       const deductible = emp.summary.deductibleShortfallHours || 0;
+                      const allowanceUsedHrs = parseFloat(emp.summary.monthlyAllowanceUsed || 0);
+                      // Total chargeable time = what the free allowance absorbed + what is deducted,
+                      // so the card always adds up (never deducts more than it shows as used).
+                      const totalMissing = Math.max(punchMissing + nonWorkingPerm, allowanceUsedHrs + deductible);
+                      // Permission hours charged on working days beyond that day's punch shortfall
+                      const extraPerm = Math.max(0, totalMissing - punchMissing - nonWorkingPerm);
                       // Covered = whatever the 3h monthly pool absorbed (total chargeable - what is deducted)
                       const covered = Math.max(0, totalMissing - deductible);
                       const amount = Math.round(emp.summary.hourlyDeductionAmount || 0);
@@ -638,10 +642,14 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                             <div className="px-4 py-3 border-r border-b sm:border-b-0 border-amber-100 dark:border-amber-900/30">
                               <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Total used (short hours + permission)</p>
                               <p className="text-sm font-semibold text-slate-900 dark:text-white tabular-nums">{totalMissing.toFixed(1)}h</p>
-                              {nonWorkingPerm > 0 && (
-                                <p className="text-[11px] text-slate-400 mt-0.5">{punchMissing.toFixed(1)}h punch shortfall + {nonWorkingPerm.toFixed(1)}h permission on OD / leave / holiday dates</p>
+                              {(nonWorkingPerm > 0 || extraPerm > 0.05) && (
+                                <p className="text-[11px] text-slate-400 mt-0.5">
+                                  {punchMissing.toFixed(1)}h punch shortfall
+                                  {nonWorkingPerm > 0 && ` + ${nonWorkingPerm.toFixed(1)}h permission on OD / leave / holiday dates`}
+                                  {extraPerm > 0.05 && ` + ${extraPerm.toFixed(1)}h permission on working days (larger than that day's shortfall)`}
+                                </p>
                               )}
-                              {nonWorkingPerm <= 0 && (
+                              {nonWorkingPerm <= 0 && extraPerm <= 0.05 && (
                                 <p className="text-[11px] text-slate-400 mt-0.5">Hours short of 9h/day on working days</p>
                               )}
                             </div>
@@ -651,7 +659,7 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                               <p className="text-[11px] text-slate-400 mt-0.5">{onProbation ? 'On probation — nothing is covered, all used hours are deducted' : `${allowanceUsed.toFixed(1)}h of ${monthlyCap}h allowance used — no deduction`}</p>
                             </div>
                             <div className="px-4 py-3 border-r border-amber-100 dark:border-amber-900/30">
-                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">{onProbation ? 'Excess hours → deducted' : `Excess beyond ${monthlyCap}h → deducted`}</p>
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">{onProbation ? 'All used hours → deducted' : `Excess beyond ${monthlyCap}h → deducted`}</p>
                               <p className={`text-sm font-semibold tabular-nums ${lopHours > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-400'}`}>{lopHours > 0 ? `${lopHours.toFixed(1)}h` : '—'}</p>
                             </div>
                             <div className="px-4 py-3 bg-red-50/60 dark:bg-red-500/5">
