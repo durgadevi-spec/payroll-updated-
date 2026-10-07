@@ -191,6 +191,13 @@ const getMissingPunchDeduction = (item: PayrollItemWithEmployee) => {
     return storedDeduction;
   }
 
+  // Every missing-punch day was waived by an exception — nothing is payable,
+  // so don't fall through to the per-day recalculation below.
+  const exceptedCount = getMissingPunchExceptionDates(item).length;
+  if (exceptedCount >= missingPunches) {
+    return 0;
+  }
+
   if (storedDeduction > 0) {
     return storedDeduction;
   }
@@ -1431,18 +1438,18 @@ export function Payroll() {
                         {analysisIsLocked ? (
                           <span className="text-amber-500" title="Locked"><Lock size={14} /></span>
                         ) : (
-                        <button
-                          onClick={() => {
-                            setEditingItem(item);
-                            setSundayInput(String(item.sunday_work_days || 0));
-                            setBonusInput(String(item.bonus || 0));
-                            setPreviousMonthBalanceInput(String((item as any).previous_month_balance || 0));
-                          }}
-                          className="p-1 text-blue-600 hover:bg-blue-50 rounded"
-                          title="Edit manual adjustments"
-                        >
-                          <Edit2 size={14} />
-                        </button>
+                          <button
+                            onClick={() => {
+                              setEditingItem(item);
+                              setSundayInput(String(item.sunday_work_days || 0));
+                              setBonusInput(String(item.bonus || 0));
+                              setPreviousMonthBalanceInput(String((item as any).previous_month_balance || 0));
+                            }}
+                            className="p-1 text-blue-600 hover:bg-blue-50 rounded"
+                            title="Edit manual adjustments"
+                          >
+                            <Edit2 size={14} />
+                          </button>
                         )}
                       </td>
                     </tr>
@@ -2273,11 +2280,11 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                             )}
                             {finalMissingDates.length > 0
                               ? finalMissingDates.map((d: string) => (
-                                  <div key={d} className="text-red-700 dark:text-red-300">
-                                    {fmt(d)}
-                                    {((item as any).timesheet_unapproved_dates || []).includes(d) && <span className="ml-1 text-[10px] font-medium text-amber-600 dark:text-amber-400">(TS not approved)</span>}
-                                  </div>
-                                ))
+                                <div key={d} className="text-red-700 dark:text-red-300">
+                                  {fmt(d)}
+                                  {((item as any).timesheet_unapproved_dates || []).includes(d) && <span className="ml-1 text-[10px] font-medium text-amber-600 dark:text-amber-400">(TS not approved)</span>}
+                                </div>
+                              ))
                               : item.missing_timesheets === 0
                                 ? <div className="text-green-600 italic">None — ₹0 deducted ✓</div>
                                 : <div className="text-red-500 italic">{item.missing_timesheets} day(s)</div>

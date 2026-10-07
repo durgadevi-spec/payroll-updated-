@@ -1561,7 +1561,11 @@ async function computePayrollPreviewData(employeeIds: string[], month: number, y
             const monDate = new Date(year, month - 1, d + 1);
             const satStr = `${satDate.getFullYear()}-${String(satDate.getMonth() + 1).padStart(2, '0')}-${String(satDate.getDate()).padStart(2, '0')}`;
             const monStr = `${monDate.getFullYear()}-${String(monDate.getMonth() + 1).padStart(2, '0')}-${String(monDate.getDate()).padStart(2, '0')}`;
-            isSandwichSunday = isPlSlEligibleLeave(empLeaves.get(satStr)) && isPlSlEligibleLeave(empLeaves.get(monStr));
+            // A government/company holiday on the Saturday or Monday is not a leave day
+            // (holidays are paid for everyone), so it cannot form a sandwich.
+            isSandwichSunday =
+              !holidaySet.has(satStr) && !holidaySet.has(monStr) &&
+              isPlSlEligibleLeave(empLeaves.get(satStr)) && isPlSlEligibleLeave(empLeaves.get(monStr));
           }
 
           if (isSandwichSunday) {
@@ -3191,8 +3195,8 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
         timesheet_status: !tsData?.submitted_at
           ? 'Not submitted'
           : (timesheetApprovalRequired && unapprovedMissingDates.length > 0
-              ? `Submitted (${unapprovedMissingDates.length} day${unapprovedMissingDates.length === 1 ? '' : 's'} not approved)`
-              : 'Submitted'),
+            ? `Submitted (${unapprovedMissingDates.length} day${unapprovedMissingDates.length === 1 ? '' : 's'} not approved)`
+            : 'Submitted'),
         timesheet_submitted_at: tsData?.submitted_at || null,
         // Days the employee submitted a timesheet but it is not approved (manager or admin) yet.
         // These are ALSO included in missing_dates / missing_timesheets and deducted as LOP when
