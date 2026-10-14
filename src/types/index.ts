@@ -7,11 +7,13 @@ export interface Employee {
   reporting_manager: string;
   department: string;
   designation: string;
+  site_location?: string;
   joining_date: string | null;
   relieving_date: string | null;
   bank_name: string;
   bank_account: string;
   ifsc_code: string;
+  pan_number?: string;
   pf_number: string;
   esi_number: string;
   uan_number: string;
@@ -112,7 +114,7 @@ export interface PayslipFull {
   email_sent: boolean;
   email_sent_at: string | null;
   created_at: string;
-  employee: Pick<Employee, 'id' | 'name' | 'email' | 'designation' | 'department' | 'bank_account' | 'pf_number' | 'uan_number'>;
+  employee: Pick<Employee, 'id' | 'employee_code' | 'name' | 'email' | 'designation' | 'department' | 'site_location' | 'bank_name' | 'bank_account' | 'pan_number' | 'pf_number' | 'uan_number'>;
   payroll: {
     id: string;
     month: number;
@@ -196,6 +198,7 @@ export type Page =
   | 'employees'
   | 'attendance'
   | 'payroll'
+  | 'overtime'
   | 'advance-management'
   | 'payslips'
   | 'reports'

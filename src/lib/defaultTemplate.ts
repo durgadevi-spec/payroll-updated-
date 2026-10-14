@@ -1,4 +1,5 @@
 import { PayslipTemplateContent } from '../types/payslip';
+import { DEFAULT_LOGO_DATA_URL } from './defaultLogo';
 
 export const DEFAULT_PAYSLIP_TEMPLATE: PayslipTemplateContent = {
   header: {
@@ -6,8 +7,10 @@ export const DEFAULT_PAYSLIP_TEMPLATE: PayslipTemplateContent = {
     address: '12/36 Indira Gandhi Street, Perumbakkam Main Rd, Chennai, TN - 600100',
     showLogo: true,
     logoText: 'CT',
+    logoUrl: DEFAULT_LOGO_DATA_URL,
   },
   sections: {
+    // Fields are laid out two per row (label | value | label | value), in this order.
     employeeDetails: {
       enabled: true,
       fields: [
@@ -27,12 +30,15 @@ export const DEFAULT_PAYSLIP_TEMPLATE: PayslipTemplateContent = {
       title: 'EARNINGS',
       rows: [
         { label: 'Basic Salary', key: 'basic_salary' },
-        { label: 'Sunday Work Earnings', key: 'sunday_work_earnings' },
         { label: 'HRA', key: 'hra' },
         { label: 'Conveyance Allowance', key: 'conveyance' },
         { label: 'Medical Allowance', key: 'medical' },
-        { label: 'Special Allowance', key: 'bonus' },
-        { label: 'Previous Month Balance', key: 'previous_month_balance' },
+        { label: 'Special Allowance', key: 'special_allowance' },
+        { label: 'Bonus', key: 'bonus', hideIfZero: true },
+        { label: 'OT Allowances', key: 'ot_allowance' },
+        // Only shown when they actually have an amount, so the slip stays clean otherwise
+        { label: 'Sunday Work Earnings', key: 'sunday_work_earnings', hideIfZero: true },
+        { label: 'Previous Month Balance', key: 'previous_month_balance', hideIfZero: true },
       ],
     },
     deductions: {
@@ -51,14 +57,19 @@ export const DEFAULT_PAYSLIP_TEMPLATE: PayslipTemplateContent = {
       title: 'Net Pay (Gross - Deductions)',
       showNetPayInWords: true,
     },
+    leaveBalances: {
+      enabled: true,
+      title: 'Leave Balances',
+    },
     footer: {
       remarks: [
-        'This is a computer generated payslip and does not require a physical signature.',
+        'This is a computer-generated payslip and does not require a physical signature.',
         'For hygienic purposes and contactless handling, retain the digital copy.',
         'Verify bank account details before initiating transfers.',
         'Keep this payslip for your personal records and statutory compliance.',
       ],
-      showGeneratedDate: true,
+      showGeneratedDate: false,
+      reimbursementsNote: 'No reimbursements claimed for this month.',
     },
   },
 };

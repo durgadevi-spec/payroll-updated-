@@ -29,11 +29,13 @@ export function EmployeeForm({ initial, onSubmit, onCancel, loading }: EmployeeF
     reporting_manager: initial?.reporting_manager || '',
     department: initial?.department || '',
     designation: initial?.designation || '',
+    site_location: initial?.site_location || '',
     joining_date: initial?.joining_date || '',
     relieving_date: initial?.relieving_date || '',
     bank_name: initial?.bank_name || '',
     bank_account: initial?.bank_account || '',
     ifsc_code: initial?.ifsc_code || '',
+    pan_number: initial?.pan_number || '',
     pf_number: initial?.pf_number || '',
     esi_number: initial?.esi_number || '',
     uan_number: initial?.uan_number || '',
@@ -106,6 +108,7 @@ export function EmployeeForm({ initial, onSubmit, onCancel, loading }: EmployeeF
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Select label="Department" value={form.department} onChange={set('department')} options={deptOptions} />
           <Input label="Designation" value={form.designation} onChange={set('designation')} placeholder="Software Engineer" />
+          <Input label="Site / Location" value={form.site_location || ''} onChange={set('site_location')} placeholder="Chennai Office" />
           <Input
             label="Reporting Manager"
             value={form.reporting_manager}
@@ -137,8 +140,9 @@ export function EmployeeForm({ initial, onSubmit, onCancel, loading }: EmployeeF
       </div>
 
       <div>
-        <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">Statutory Details</p>
+        <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">Tax & Statutory Details</p>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <Input label="PAN Number" value={form.pan_number || ''} onChange={set('pan_number')} placeholder="ABCDE1234F" />
           <Input label="PF Number" value={form.pf_number} onChange={set('pf_number')} placeholder="PF001" />
           <Input label="ESI Number" value={form.esi_number} onChange={set('esi_number')} placeholder="ESI001" />
           <Input label="UAN Number" value={form.uan_number} onChange={set('uan_number')} placeholder="UAN001" />

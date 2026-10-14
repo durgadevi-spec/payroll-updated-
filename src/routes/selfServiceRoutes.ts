@@ -39,12 +39,12 @@ export const requireEmployeeAuth = async (req: AuthenticatedRequest, res: Respon
   let client;
   try {
     client = await payrollPool.connect();
-    
+
     let result = await client.query('SELECT * FROM employees WHERE auth_user_id = $1', [user.id]);
-    
+
     if (result.rows.length === 0) {
       result = await client.query('SELECT * FROM employees WHERE LOWER(email) = LOWER($1)', [user.email]);
-      
+
       if (result.rows.length > 0) {
         const empId = result.rows[0].id;
         const updateRes = await client.query(
@@ -119,7 +119,7 @@ selfServiceRouter.post('/me/advances/request', async (req: AuthenticatedRequest,
   let client;
   try {
     client = await payrollPool.connect();
-    
+
     const result = await client.query(`
       INSERT INTO advances (
         employee_id, amount, date, advance_type, reason, 
@@ -154,9 +154,9 @@ selfServiceRouter.get('/me/payslips', async (req: AuthenticatedRequest, res: Res
     client = await payrollPool.connect();
     const result = await client.query(`
       SELECT ps.*, 
-             e.id as emp_id, e.name as emp_name, e.email as emp_email, e.designation, e.department, e.bank_account, e.pf_number, e.uan_number,
+             e.id as emp_id, e.employee_code, e.joining_date, e.name as emp_name, e.email as emp_email, e.designation, e.department, e.bank_account, e.pf_number, e.uan_number,
              p.id as pr_id, p.month, p.year, p.status as pr_status,
-             pi.monthly_salary, pi.leave_deduction, pi.timesheet_deduction, pi.pf_deduction, pi.esi_deduction, pi.tax_deduction, pi.loan_deduction, pi.advance_deduction, pi.sunday_work_days, pi.bonus, pi.previous_month_balance, pi.net_salary, pi.working_days, pi.unpaid_leaves
+             pi.monthly_salary, pi.leave_deduction, pi.timesheet_deduction, pi.pf_deduction, pi.esi_deduction, pi.tax_deduction, pi.loan_deduction, pi.advance_deduction, pi.sunday_work_days, pi.bonus, pi.previous_month_balance, pi.hra, pi.conveyance, pi.medical, pi.ot_allowance, pi.leave_balances, pi.net_salary, pi.working_days, pi.unpaid_leaves
       FROM payslips ps
       JOIN employees e ON ps.employee_id = e.id
       JOIN payrolls p ON ps.payroll_id = p.id
@@ -164,7 +164,7 @@ selfServiceRouter.get('/me/payslips', async (req: AuthenticatedRequest, res: Res
       WHERE ps.employee_id = $1
       ORDER BY ps.created_at DESC
     `, [employeeId]);
-    
+
     const mapped = result.rows.map((r: Record<string, any>) => ({
       id: r.id,
       payroll_id: r.payroll_id,
@@ -173,12 +173,12 @@ selfServiceRouter.get('/me/payslips', async (req: AuthenticatedRequest, res: Res
       email_sent: r.email_sent,
       email_sent_at: r.email_sent_at,
       created_at: r.created_at,
-      employee: { id: r.emp_id, name: r.emp_name, email: r.emp_email, designation: r.designation, department: r.department, bank_account: r.bank_account, pf_number: r.pf_number, uan_number: r.uan_number },
+      employee: { id: r.emp_id, employee_code: r.employee_code, joining_date: r.joining_date, name: r.emp_name, email: r.emp_email, designation: r.designation, department: r.department, bank_account: r.bank_account, pf_number: r.pf_number, uan_number: r.uan_number },
       payroll: { id: r.pr_id, month: r.month, year: r.year, status: r.pr_status },
       payroll_item: {
         monthly_salary: r.monthly_salary, leave_deduction: r.leave_deduction, timesheet_deduction: r.timesheet_deduction,
         pf_deduction: r.pf_deduction, esi_deduction: r.esi_deduction, tax_deduction: r.tax_deduction, loan_deduction: r.loan_deduction,
-        advance_deduction: r.advance_deduction, sunday_work_days: r.sunday_work_days, bonus: r.bonus, previous_month_balance: r.previous_month_balance, net_salary: r.net_salary,
+        advance_deduction: r.advance_deduction, sunday_work_days: r.sunday_work_days, bonus: r.bonus, previous_month_balance: r.previous_month_balance, hra: r.hra, conveyance: r.conveyance, medical: r.medical, ot_allowance: r.ot_allowance, leave_balances: r.leave_balances, net_salary: r.net_salary,
         working_days: r.working_days, unpaid_leaves: r.unpaid_leaves
       }
     }));
@@ -199,15 +199,15 @@ selfServiceRouter.get('/me/attendance', async (req: AuthenticatedRequest, res: R
   let client;
   try {
     client = await payrollPool.connect();
-    
+
     let queryArgs: any[] = [employeeCode];
     let dateFilter = '';
-    
+
     if (month && year) {
       dateFilter = 'AND EXTRACT(MONTH FROM punch_time) = $2 AND EXTRACT(YEAR FROM punch_time) = $3';
       queryArgs.push(Number(month), Number(year));
     }
-    
+
     const logsRes = await client.query(`
       SELECT emp_code, punch_time 
       FROM attendance_logs 

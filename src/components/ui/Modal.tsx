@@ -7,8 +7,10 @@ interface ModalProps {
   title: string;
   subtitle?: string;
   children: ReactNode;
-  size?: 'sm' | 'md' | 'lg' | 'xl';
+  size?: 'sm' | 'md' | 'lg' | 'xl' | '2xl' | 'full';
   footer?: ReactNode;
+  /** Opt-in: stretch the dialog to cover the whole screen. */
+  fullscreen?: boolean;
 }
 
 const sizes = {
@@ -16,9 +18,11 @@ const sizes = {
   md: 'max-w-lg',
   lg: 'max-w-2xl',
   xl: 'max-w-4xl',
+  '2xl': 'max-w-6xl',
+  full: 'max-w-full',
 };
 
-export function Modal({ isOpen, onClose, title, subtitle, children, size = 'md', footer }: ModalProps) {
+export function Modal({ isOpen, onClose, title, subtitle, children, size = 'md', footer, fullscreen = false }: ModalProps) {
   useEffect(() => {
     if (isOpen) {
       document.body.style.overflow = 'hidden';
@@ -31,13 +35,13 @@ export function Modal({ isOpen, onClose, title, subtitle, children, size = 'md',
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className={`fixed inset-0 z-50 flex items-center justify-center ${fullscreen ? 'p-0' : 'p-4'}`}>
       <div
         className="absolute inset-0 bg-black/50 backdrop-blur-sm"
         onClick={onClose}
       />
       <div
-        className={`relative bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full ${sizes[size]} max-h-[90vh] flex flex-col border border-slate-200 dark:border-slate-700`}
+        className={`relative bg-white dark:bg-slate-800 shadow-2xl w-full ${fullscreen ? 'h-full max-w-full max-h-full rounded-none' : `${sizes[size]} max-h-[90vh] rounded-2xl`} flex flex-col border border-slate-200 dark:border-slate-700`}
       >
         <div className="flex items-start justify-between p-6 border-b border-slate-200 dark:border-slate-700 flex-shrink-0">
           <div>
@@ -57,7 +61,7 @@ export function Modal({ isOpen, onClose, title, subtitle, children, size = 'md',
         </div>
 
         {footer && (
-          <div className="p-6 border-t border-slate-200 dark:border-slate-700 flex-shrink-0 bg-slate-50 dark:bg-slate-800/50 rounded-b-2xl">
+          <div className={`p-6 border-t border-slate-200 dark:border-slate-700 flex-shrink-0 bg-slate-50 dark:bg-slate-800/50 ${fullscreen ? '' : 'rounded-b-2xl'}`}>
             {footer}
           </div>
         )}

@@ -7,6 +7,7 @@ const pageTitles: Record<Page, string> = {
   dashboard: 'Dashboard',
   employees: 'Employee Management',
   payroll: 'Payroll',
+  overtime: 'Overtime',
   payslips: 'Payslips',
   reports: 'Reports',
   settings: 'Settings',
@@ -18,9 +19,11 @@ const pageTitles: Record<Page, string> = {
 interface NavbarProps {
   currentPage: Page;
   onMenuToggle: () => void;
+  onSidebarCollapse: () => void;
+  sidebarCollapsed: boolean;
 }
 
-export function Navbar({ currentPage, onMenuToggle }: NavbarProps) {
+export function Navbar({ currentPage, onMenuToggle, onSidebarCollapse, sidebarCollapsed }: NavbarProps) {
   const { theme, toggleTheme } = useTheme();
   const { logout, user } = useAuth();
   const userEmail = user?.email || 'User';
@@ -33,6 +36,16 @@ export function Navbar({ currentPage, onMenuToggle }: NavbarProps) {
         <button
           onClick={onMenuToggle}
           className="lg:hidden p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+          aria-label="Open navigation menu"
+          title="Open navigation menu"
+        >
+          <Menu size={20} />
+        </button>
+        <button
+          onClick={onSidebarCollapse}
+          className="hidden lg:inline-flex p-2 rounded-lg text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+          aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
           <Menu size={20} />
         </button>

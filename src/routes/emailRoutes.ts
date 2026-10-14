@@ -4,6 +4,10 @@ import dotenv from 'dotenv';
 import nodemailer from 'nodemailer';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { PAGE_WIDTH_PX, visualItemText, type VisualPayslipData } from '../lib/visualTemplate';
+import { DEFAULT_PAYSLIP_TEMPLATE } from '../lib/defaultTemplate';
+import { numberToWords } from '../lib/numberToWords';
+import { getSalaryBreakdown } from '../lib/salaryBreakdown';
 
 dotenv.config({ path: './.env' });
 
@@ -24,6 +28,7 @@ function formatCurrency(value: number, skipSymbol: boolean = false) {
 }
 
 const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const fullMonthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
 /**
  * Fetches email settings from the database
@@ -34,7 +39,7 @@ async function getEmailSettings() {
   try {
     const res = await client.query("SELECT key, value FROM settings WHERE key IN ('smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_from', 'company_email')");
     const settings: Record<string, string> = {};
-    res.rows.forEach(row => { settings[row.key] = row.value; });
+    res.rows.forEach((row: any) => { settings[row.key] = row.value; });
     return settings;
   } finally {
     await client.end();
@@ -70,169 +75,398 @@ function buildPayslipHtml(row: any) {
   `;
 }
 
-function generatePayslipPdf(row: any, templateContent?: any) {
-  const doc = new jsPDF();
-  const pageWidth = doc.internal.pageSize.getWidth();
-  
-  const header = templateContent?.header || {
-    title: 'CONCEPT TRUNK INTERIORS',
-    address: '2/36 A, Indira Gandhi Street, Perumbakkam Main Rd, Chennai, Tamil Nadu 600100',
-    logoText: 'CT',
-    showLogo: true
+
+/** Adds a data-URL image to the PDF; never throws (a bad image must not block sending). */
+function safeAddImage(doc: jsPDF, dataUrl: string | undefined, x: number, y: number, w: number, h: number, opts?: { fit?: boolean; opacity?: number }) {
+  if (!dataUrl || !dataUrl.startsWith('data:image/')) return false;
+  try {
+    const fmt = /^data:image\/png/i.test(dataUrl) ? 'PNG' : 'JPEG';
+    let dx = x, dy = y, dw = w, dh = h;
+    if (opts?.fit) {
+      const props = doc.getImageProperties(dataUrl);
+      const ratio = Math.min(w / props.width, h / props.height);
+      dw = props.width * ratio;
+      dh = props.height * ratio;
+      dx = x + (w - dw) / 2;
+      dy = y + (h - dh) / 2;
+    }
+    const withOpacity = opts?.opacity !== undefined && opts.opacity < 1;
+    if (withOpacity) {
+      doc.saveGraphicsState();
+      doc.setGState(new (doc as any).GState({ opacity: opts!.opacity }));
+    }
+    doc.addImage(dataUrl, fmt, dx, dy, dw, dh);
+    if (withOpacity) doc.restoreGraphicsState();
+    return true;
+  } catch (err) {
+    console.warn('[PDF] Could not embed image:', (err as Error).message);
+    return false;
+  }
+}
+
+/**
+ * Full-page "image template": the uploaded image fills the page (at its own shape, never stretched),
+ * then cover boxes, text boxes and payroll values are drawn on top. Mirrors VisualPayslipPage.tsx.
+ */
+export function renderVisualTemplate(row: any, templateContent: any) {
+  const cfg = templateContent.visualConfig;
+  const aspect = Number(cfg.aspectRatio) > 0 ? Number(cfg.aspectRatio) : 297 / 210;
+  const pageWidth = 210;
+  const pageHeight = 210 * aspect;
+  const doc = new jsPDF({
+    unit: 'mm',
+    format: [Math.min(pageWidth, pageHeight), Math.max(pageWidth, pageHeight)],
+    orientation: pageHeight >= pageWidth ? 'portrait' : 'landscape',
+  });
+  safeAddImage(doc, cfg.backgroundImage, 0, 0, pageWidth, pageHeight);
+
+  const grossSalary = Number(row.monthly_salary ?? row.basic_salary ?? 0);
+  const salaryBreakdown = getSalaryBreakdown(grossSalary, {
+    hra: row.hra,
+    conveyance: row.conveyance,
+    medical: row.medical,
+  });
+  const data: VisualPayslipData = {
+    employee_name: row.employee_name,
+    employee_code: String(row.employee_code || row.employee_id || ''),
+    designation: row.designation,
+    department: row.department,
+    site_location: row.site_location,
+    basic_salary: salaryBreakdown.basic_salary,
+    hra: salaryBreakdown.hra,
+    conveyance: salaryBreakdown.conveyance,
+    medical: salaryBreakdown.medical,
+    special_allowance: salaryBreakdown.special_allowance,
+    pan_number: row.pan_number,
+    bank_account: row.bank_account,
+    month: row.month,
+    year: row.year,
+    working_days: row.working_days,
+    calculation_days: row.calculation_days,
+    monthly_salary: grossSalary,
+    sunday_work_days: row.sunday_work_days,
+    bonus: row.bonus,
+    previous_month_balance: row.previous_month_balance,
+    leave_deduction: row.leave_deduction,
+    timesheet_deduction: row.timesheet_deduction,
+    pf_deduction: row.pf_deduction,
+    esi_deduction: row.esi_deduction,
+    tax_deduction: row.tax_deduction,
+    loan_deduction: row.loan_deduction,
+    advance_deduction: row.advance_deduction,
+    net_salary: row.net_salary,
   };
 
-  // 1. Logo Box (Top Left)
-  if (header.showLogo) {
+  const rgb = (hex: string, fallback: [number, number, number]): [number, number, number] =>
+    /^#[0-9a-f]{6}$/i.test(hex || '') ? [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)] : fallback;
+
+  const items: any[] = cfg.fields || [];
+  const pad = 0.5; // mm, matches the 2px padding used on screen
+  const mmPerPx = pageWidth / PAGE_WIDTH_PX;
+
+  // covers first so they never hide values/text drawn later
+  const ordered = [...items.filter(f => f.kind === 'cover'), ...items.filter(f => f.kind !== 'cover')];
+  for (const f of ordered) {
+    const bx = (f.x / 100) * pageWidth;
+    const by = (f.y / 100) * pageHeight;
+    const bw = f.width != null ? (f.width / 100) * pageWidth : undefined;
+    const bh = f.height != null ? (f.height / 100) * pageHeight : undefined;
+
+    if (f.bgColor && bw != null && bh != null) {
+      const [r, g, b] = rgb(f.bgColor, [255, 255, 255]);
+      doc.setFillColor(r, g, b);
+      doc.rect(bx, by, bw, bh, 'F');
+    }
+    if (f.kind === 'cover') continue;
+
+    // the built-in PDF font has no rupee glyph
+    const text = visualItemText(f, data, 'Rs. ').replace(/₹/g, 'Rs.');
+    if (!text) continue;
+
+    const [tr, tg, tb] = rgb(f.color, [0, 0, 0]);
+    doc.setTextColor(tr, tg, tb);
+    doc.setFont('helvetica', ['bold', 'black', 'medium'].includes(f.fontWeight) ? 'bold' : 'normal');
+    let fontPx = f.fontSize || 12;
+    doc.setFontSize(fontPx * mmPerPx * 2.8346); // px on the 800px page -> pt
+    if (bw != null) {
+      const avail = bw - pad * 2;
+      const w = doc.getTextWidth(text);
+      if (w > avail && avail > 0) {
+        fontPx = Math.max(fontPx * 0.5, fontPx * (avail / w));
+        doc.setFontSize(fontPx * mmPerPx * 2.8346);
+      }
+    }
+
+    const align = f.align || 'left';
+    let tx = bx + pad;
+    if (bw != null && align === 'right') tx = bx + bw - pad;
+    else if (bw != null && align === 'center') tx = bx + bw / 2;
+    if (bh != null) {
+      doc.text(text, tx, by + bh / 2, { align, baseline: 'middle' });
+    } else {
+      doc.text(text, tx, by, { align, baseline: 'top' });
+    }
+  }
+  return Buffer.from(doc.output('arraybuffer'));
+}
+
+function generatePayslipPdf(row: any, templateContent?: any) {
+  const doc = new jsPDF();
+  const basicSalary = Number(row.monthly_salary ?? row.basic_salary ?? 0);
+  const salaryBreakdown = getSalaryBreakdown(basicSalary, {
+    hra: row.hra,
+    conveyance: row.conveyance,
+    medical: row.medical,
+  });
+  const prevBalance = Number(row.previous_month_balance || 0);
+  const pageWidth = doc.internal.pageSize.getWidth();
+
+  if (templateContent?.type === 'visual' && templateContent?.visualConfig?.backgroundImage) {
+    return renderVisualTemplate(row, templateContent);
+  }
+
+  // No template chosen -> built-in default template (Concept Trunk payslip format)
+  const tpl = templateContent?.sections ? templateContent : DEFAULT_PAYSLIP_TEMPLATE;
+  const header = tpl.header || DEFAULT_PAYSLIP_TEMPLATE.header;
+  const money = (v: number) => (!Number(v) ? '00.00' : formatCurrency(Number(v), true));
+  const fmtDate = (d: any) => {
+    if (!d) return '—';
+    const dt = new Date(d);
+    if (isNaN(dt.getTime())) return '—';
+    return `${String(dt.getDate()).padStart(2, '0')}/${String(dt.getMonth() + 1).padStart(2, '0')}/${dt.getFullYear()}`;
+  };
+  const GRID = [120, 120, 120] as [number, number, number];
+  const HEAD_FILL = [217, 217, 217] as [number, number, number];
+  const base = { fontSize: 8, cellPadding: 2, lineColor: GRID, lineWidth: 0.2, textColor: [0, 0, 0] as [number, number, number], font: 'times' };
+
+  // 0. Background image (template header setting), drawn first so everything sits on top
+  if (header.backgroundImage) {
+    const op = Math.min(100, Math.max(0, Number(header.backgroundOpacity ?? 40))) / 100;
+    safeAddImage(doc, header.backgroundImage, 0, 0, pageWidth, doc.internal.pageSize.getHeight(), { opacity: op });
+  }
+
+  // 1. Logo box (top left)
+  if (header.showLogo && header.logoUrl && safeAddImage(doc, header.logoUrl, 14, 10, 26, 26, { fit: true })) {
+    // uploaded logo image drawn
+  } else if (header.showLogo) {
     doc.setFillColor(0, 0, 0);
-    doc.rect(14, 10, 25, 25, 'F');
+    doc.rect(14, 10, 26, 26, 'F');
     doc.setTextColor(255, 255, 255);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(18);
-    doc.text(header.logoText || 'CT', 26.5, 23, { align: 'center' });
-    doc.setFontSize(5);
-    doc.text('CONCEPT TRUNK', 26.5, 30, { align: 'center' });
+    doc.text(header.logoText || 'CT', 27, 25, { align: 'center' });
   }
-  
-  // 2. Company Name (Top Right)
-  doc.setTextColor(30, 41, 59);
-  doc.setFontSize(22);
-  doc.setFont('helvetica', 'bold');
-  doc.text(header.title || 'CONCEPT TRUNK INTERIORS', 45, 22);
+
+  // 2. Company name + address
+  doc.setTextColor(0, 0, 0);
+  doc.setFontSize(24);
+  doc.setFont('helvetica', 'normal');
+  doc.text(String(header.title || '').toUpperCase(), 46, 24);
   doc.setFontSize(8);
+  doc.setFont('times', 'normal');
+  doc.setTextColor(120, 120, 120);
+  doc.text(header.address || '', 46, 40);
+
+  // 3. Title
+  doc.setTextColor(0, 0, 0);
+  doc.setFontSize(14);
   doc.setFont('helvetica', 'normal');
-  doc.setTextColor(100, 116, 139);
-  doc.text(header.address || '2/36 A, Indira Gandhi Street, Perumbakkam Main Rd, Chennai, Tamil Nadu 600100', 45, 28);
-  
-  // 3. Title Bar
-  doc.setDrawColor(226, 232, 240);
-  doc.line(14, 40, pageWidth - 14, 40);
-  doc.line(14, 48, pageWidth - 14, 48);
-  doc.setTextColor(15, 23, 42);
-  doc.setFontSize(11);
-  doc.setFont('helvetica', 'bold');
-  doc.text(`PAY SLIP — ${monthNames[row.month - 1].toUpperCase()} ${row.year}`, pageWidth / 2, 45, { align: 'center' });
-  
-  // 4. Employee Information Table
-  autoTable(doc, {
-    startY: 55,
-    body: [
-      [{ content: 'Employee Code', styles: { fontStyle: 'bold', fillColor: [248, 250, 252] } }, row.employee_id?.substring(0, 8).toUpperCase(), { content: 'Employee Name', styles: { fontStyle: 'bold', fillColor: [248, 250, 252] } }, row.employee_name || '—'],
-      [{ content: 'Designation', styles: { fontStyle: 'bold', fillColor: [248, 250, 252] } }, row.designation || '—', { content: 'Department', styles: { fontStyle: 'bold', fillColor: [248, 250, 252] } }, row.department || '—'],
-      [{ content: 'Mode of Pay', styles: { fontStyle: 'bold', fillColor: [248, 250, 252] } }, 'Bank Transfer', { content: 'Bank (A/C)', styles: { fontStyle: 'bold', fillColor: [248, 250, 252] } }, row.bank_account || '—'],
-      [{ content: 'Payable Days', styles: { fontStyle: 'bold', fillColor: [248, 250, 252] } }, row.working_days || '0', { content: 'Date of Joining', styles: { fontStyle: 'bold', fillColor: [248, 250, 252] } }, row.joining_date ? new Date(row.joining_date).toLocaleDateString() : '—'],
-    ],
-    theme: 'grid',
-    styles: { fontSize: 8, cellPadding: 2, lineColor: [203, 213, 225], lineWidth: 0.1 },
-  });
-  
-  // 5. Earnings & Deductions Table
-  const perDaySalary = (row.basic_salary || 0) / (row.working_days || 26);
-  const sundayEarnings = Math.round(perDaySalary * (row.sunday_work_days || 0) * 100) / 100;
-  
-  const earningsData = templateContent?.sections?.earnings?.rows?.map((r: any) => {
-    let val = 0;
-    if (r.key === 'basic_salary') val = row.basic_salary || 0;
-    else if (r.key === 'sunday_work_earnings') val = sundayEarnings || 0;
-    else if (r.key === 'bonus') val = row.bonus || 0;
-    return [r.label, formatCurrency(val, true)];
-  }) || [
-    ['Basic Salary', formatCurrency(row.basic_salary, true)],
-    ['Sunday Work Earnings', formatCurrency(sundayEarnings, true)],
-    ['Special Allowance / Bonus', formatCurrency(row.bonus || 0, true)],
-  ];
+  doc.text(`PAY SLIP — ${fullMonthNames[row.month - 1]} ${row.year}`, pageWidth / 2, 54, { align: 'center' });
 
-  const totalEarnings = templateContent?.sections?.earnings?.rows?.reduce((sum: number, r: any) => {
-    let val = 0;
-    if (r.key === 'basic_salary') val = Number(row.basic_salary || 0);
-    else if (r.key === 'sunday_work_earnings') val = Number(sundayEarnings || 0);
-    else if (r.key === 'bonus') val = Number(row.bonus || 0);
-    return sum + val;
-  }, 0) || (Number(row.basic_salary || 0) + Number(sundayEarnings || 0) + Number(row.bonus || 0));
+  let y = 60;
 
-  earningsData.push(['Gross Earnings', formatCurrency(totalEarnings, true)]);
-  
-  const deductionsData = templateContent?.sections?.deductions?.rows?.map((r: any) => {
-    let val = 0;
-    if (r.key === 'leave_deduction') val = Number(row.leave_deduction || 0);
-    else if (r.key === 'pf_deduction') val = Number(row.pf_deduction || 0);
-    else if (r.key === 'esi_deduction') val = Number(row.esi_deduction || 0);
-    else if (r.key === 'tax_deduction') val = Number(row.tax_deduction || 0);
-    else if (r.key === 'loan_deduction') val = Number(row.loan_deduction || 0);
-    else if (r.key === 'advance_deduction') val = Number(row.advance_deduction || 0);
-    else if (r.key === 'total_deductions') {
-      val = Number(row.pf_deduction || 0) + Number(row.esi_deduction || 0) + Number(row.loan_deduction || 0) + Number(row.advance_deduction || 0) + Number(row.leave_deduction || 0);
+  // 4. Employee details (two label/value pairs per row), driven by the template fields
+  if (tpl.sections.employeeDetails?.enabled !== false) {
+    const valueFor = (key: string): string => {
+      switch (key) {
+        case 'employee_code': return row.employee_code || row.employee_id?.substring(0, 8)?.toUpperCase() || '—';
+        case 'employee_name': return row.employee_name || '—';
+        case 'designation': return row.designation || '—';
+        case 'department': return row.department || '—';
+        case 'site':
+        case 'site_location': return row.site_location || row.site || row.location || '—';
+        case 'joining_date': return fmtDate(row.joining_date);
+        case 'pan': return row.pan || row.pan_number || '—';
+        case 'bank_account': return row.bank_account ? `${row.bank_name ? row.bank_name + ' - ' : ''}${row.bank_account}` : '—';
+        case 'pay_mode': return 'NEFT / Bank Transfer';
+        case 'working_days': return String(row.working_days ?? 0);
+        default: return '—';
+      }
+    };
+    const fields: { label: string; key: string }[] = tpl.sections.employeeDetails.fields || [];
+    const body: any[][] = [];
+    for (let i = 0; i < fields.length; i += 2) {
+      const bold = i === 0 ? { fontStyle: 'bold', font: 'helvetica' } : {};
+      const l = fields[i];
+      const r = fields[i + 1];
+      body.push([
+        { content: l.label, styles: bold },
+        { content: valueFor(l.key), styles: bold },
+        { content: r ? r.label : '', styles: bold },
+        { content: r ? valueFor(r.key) : '', styles: bold },
+      ]);
     }
-    return [r.label, formatCurrency(val, true)];
-  }) || [
-    ['Leave (LOP)', formatCurrency(row.leave_deduction || 0, true)],
-    ['Statutory (PF/ESI)', formatCurrency(Number(row.pf_deduction || 0) + Number(row.esi_deduction || 0), true)],
-    ['Loan / Advance Recovery', formatCurrency(Number(row.loan_deduction || 0) + Number(row.advance_deduction || 0), true)],
-    ['Total Deductions', formatCurrency(Number(row.pf_deduction || 0) + Number(row.esi_deduction || 0) + Number(row.loan_deduction || 0) + Number(row.advance_deduction || 0) + Number(row.leave_deduction || 0), true)],
-  ];
-  
-  autoTable(doc, {
-    startY: (doc as any).lastAutoTable.finalY + 8,
-    head: [[
-      { content: templateContent?.sections?.earnings?.title || 'EARNINGS', styles: { fillColor: [226, 232, 240] } }, 
-      { content: 'Amount (INR)', styles: { fillColor: [226, 232, 240], halign: 'right' } }, 
-      { content: templateContent?.sections?.deductions?.title || 'DEDUCTIONS', styles: { fillColor: [226, 232, 240] } }, 
-      { content: 'Amount (INR)', styles: { fillColor: [226, 232, 240], halign: 'right' } }
-    ]],
-    body: earningsData.map((e: any, i: number) => {
-      const isLastRow = i === earningsData.length - 1;
-      const d = deductionsData[i] || ['', ''];
-      return [
-        { content: e[0], styles: { fontStyle: isLastRow ? 'bold' : 'normal' } },
-        { content: e[1], styles: { halign: 'right', fontStyle: isLastRow ? 'bold' : 'normal' } },
-        { content: d[0], styles: { fontStyle: isLastRow ? 'bold' : 'normal' } },
-        { content: d[1], styles: { halign: 'right', fontStyle: isLastRow ? 'bold' : 'normal' } }
-      ];
-    }),
-    theme: 'grid',
-    styles: { fontSize: 8, cellPadding: 2, lineColor: [203, 213, 225], lineWidth: 0.1 },
-  });
-  
-  // 6. Net Pay Summary
-  const netPayY = (doc as any).lastAutoTable.finalY + 8;
-  doc.setDrawColor(15, 23, 42);
-  doc.setFillColor(241, 245, 249);
-  doc.rect(14, netPayY, pageWidth - 28, 12, 'FD');
-  doc.setTextColor(15, 23, 42);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(10);
-  doc.text(templateContent?.sections?.summary?.title || 'Net Pay (Gross - Deductions)', 18, netPayY + 7.5);
-  doc.text(formatCurrency(row.net_salary, true), pageWidth - 18, netPayY + 7.5, { align: 'right' });
-  
-  // 7. Remarks & Footer
-  doc.setTextColor(100, 116, 139);
-  doc.setFontSize(7);
-  doc.setFont('helvetica', 'normal');
-  const footerY = netPayY + 18;
-  doc.text('Remarks:', 14, footerY);
-  
-  const remarks = templateContent?.sections?.footer?.remarks || [
-    'This is a computer generated payslip and does not require a physical signature.',
-    'Verify bank account details before initiating transfers.',
-    'Keep this payslip for your personal records and statutory compliance.'
-  ];
-
-  remarks.forEach((remark: string, index: number) => {
-    doc.text(`- ${remark}`, 14, footerY + 4 + (index * 4));
-  });
-  
-  if (templateContent?.sections?.footer?.showGeneratedDate !== false) {
-    doc.setDrawColor(241, 245, 249);
-    doc.line(14, footerY + 20 + (remarks.length * 2), pageWidth - 14, footerY + 20 + (remarks.length * 2));
-    doc.text(`Generated on: ${new Date().toLocaleDateString()}`, 14, footerY + 25 + (remarks.length * 2));
-    doc.text('Electronic Copy', pageWidth - 14, footerY + 25 + (remarks.length * 2), { align: 'right' });
+    autoTable(doc, {
+      startY: y,
+      margin: { left: 22, right: 22 },
+      body,
+      theme: 'grid',
+      styles: base,
+      columnStyles: { 0: { cellWidth: 30 }, 1: { cellWidth: 52 }, 2: { cellWidth: 30 }, 3: { cellWidth: 'auto' } },
+    });
+    y = (doc as any).lastAutoTable.finalY + 10;
   }
-  
+
+  // 5. Earnings & Deductions
+  const perDaySalary = (basicSalary || 0) / (row.working_days || 26);
+  const sundayEarnings = Math.round(perDaySalary * (row.sunday_work_days || 0) * 100) / 100;
+
+  const earnValue = (key: string, label = '') => {
+    const isLegacySpecialAllowance = key === 'bonus' && /special allowance/i.test(label);
+    if (key === 'basic_salary') return salaryBreakdown.basic_salary;
+    if (key === 'monthly_salary') return basicSalary || 0;
+    if (key === 'sunday_work_earnings') return sundayEarnings || 0;
+    if (key === 'bonus' && !isLegacySpecialAllowance) return Number(row.bonus || 0);
+    if (key === 'previous_month_balance') return prevBalance;
+    if (key === 'hra') return salaryBreakdown.hra;
+    if (key === 'conveyance') return salaryBreakdown.conveyance;
+    if (key === 'medical') return salaryBreakdown.medical;
+    if (key === 'special_allowance' || isLegacySpecialAllowance) return salaryBreakdown.special_allowance;
+    if (key === 'ot_allowance') return Number(row.ot_allowance || 0);
+    return 0;
+  };
+  const totalDed = Number(row.leave_deduction || 0) + Number(row.timesheet_deduction || 0) + Number(row.pf_deduction || 0) + Number(row.esi_deduction || 0) + Number(row.tax_deduction || 0) + Number(row.loan_deduction || 0) + Number(row.advance_deduction || 0);
+  const dedValue = (key: string) => {
+    if (key === 'leave_deduction' || key === 'lop') return Number(row.leave_deduction || 0) + Number(row.timesheet_deduction || 0);
+    if (key === 'pf_deduction' || key === 'pf') return Number(row.pf_deduction || 0);
+    if (key === 'esi_deduction' || key === 'esi') return Number(row.esi_deduction || 0);
+    if (key === 'tax_deduction' || key === 'tax') return Number(row.tax_deduction || 0);
+    if (key === 'loan_deduction' || key === 'loan') return Number(row.loan_deduction || 0);
+    if (key === 'advance_deduction' || key === 'advance') return Number(row.advance_deduction || 0);
+    if (key === 'total_deductions') return totalDed;
+    return 0;
+  };
+
+  const earnRows = (tpl.sections.earnings?.rows || []).map((r: any) => ({ label: r.label, key: r.key, val: earnValue(r.key, r.label), hide: !!r.hideIfZero }));
+  if (Number(row.bonus || 0) !== 0 && !earnRows.some((r: any) => r.key === 'bonus' && !/special allowance/i.test(r.label))) {
+    earnRows.push({ label: 'Bonus', key: 'bonus', val: Number(row.bonus || 0), hide: true });
+  }
+  // Previous Month Balance always surfaces when non-zero, even on older templates without that row
+  if (prevBalance > 0 && !earnRows.some((r: any) => r.key === 'previous_month_balance')) {
+    earnRows.push({ label: 'Previous Month Balance', key: 'previous_month_balance', val: prevBalance, hide: false });
+  }
+  const earnShown = earnRows.filter((r: any) => !r.hide || r.val !== 0);
+  const grossEarnings = earnRows.reduce((sum: number, r: any) => sum + Number(r.val || 0), 0);
+  const dedShown = (tpl.sections.deductions?.rows || [])
+    .map((r: any) => ({ label: r.label, val: dedValue(r.key), hide: !!r.hideIfZero }))
+    .filter((r: any) => !r.hide || r.val !== 0);
+
+  const left: string[][] = [...earnShown.map((r: any) => [r.label, money(r.val)]), ['Gross Earnings', money(grossEarnings)]];
+  const rowCount = Math.max(left.length, dedShown.length);
+  const edBody: any[][] = [];
+  for (let i = 0; i < rowCount; i++) {
+    const l = left[i];
+    const d = dedShown[i];
+    edBody.push([
+      { content: l ? l[0] : '', styles: l ? {} : { lineWidth: 0 } },
+      { content: l ? l[1] : '', styles: l ? { halign: 'right' } : { lineWidth: 0 } },
+      { content: d ? d.label : '', styles: d ? {} : { lineWidth: 0 } },
+      { content: d ? money(d.val) : '', styles: d ? { halign: 'right' } : { lineWidth: 0 } },
+    ]);
+  }
+  const headStyle = { fillColor: HEAD_FILL, textColor: [0, 0, 0] as [number, number, number], font: 'helvetica', fontStyle: 'bold' as const, lineColor: GRID, lineWidth: 0.2 };
+  autoTable(doc, {
+    startY: y,
+    margin: { left: 14, right: 14 },
+    head: [[
+      { content: tpl.sections.earnings?.title || 'EARNINGS', styles: headStyle },
+      { content: 'Amount (INR)', styles: headStyle },
+      { content: tpl.sections.deductions?.title || 'DEDUCTIONS', styles: headStyle },
+      { content: 'Amount (INR)', styles: headStyle },
+    ]],
+    body: edBody,
+    theme: 'grid',
+    styles: base,
+    columnStyles: { 0: { cellWidth: 52 }, 1: { cellWidth: 40 }, 2: { cellWidth: 50 }, 3: { cellWidth: 'auto' } },
+  });
+  y = (doc as any).lastAutoTable.finalY + 10;
+
+  // 6. Net pay (+ in words)
+  const netPay = Number(row.net_salary || 0);
+  const netWords = `Rupees ${numberToWords(Math.round(netPay)).replace(/\s*Rupees$/, '')} only`;
+  const netBody: any[][] = [[
+    { content: tpl.sections.summary?.title || 'Net Pay (Gross - Deductions)', styles: { fontStyle: 'bold', font: 'helvetica', fontSize: 10, fillColor: [242, 242, 242] } },
+    { content: money(netPay), styles: { fontStyle: 'bold', font: 'helvetica', fontSize: 10, halign: 'right', fillColor: [242, 242, 242] } },
+  ]];
+  if (tpl.sections.summary?.showNetPayInWords !== false) {
+    netBody.push(['Net Pay(in words)', netWords]);
+  }
+  autoTable(doc, {
+    startY: y,
+    margin: { left: 14, right: 14 },
+    body: netBody,
+    theme: 'grid',
+    styles: base,
+    columnStyles: { 0: { cellWidth: 100 }, 1: { cellWidth: 'auto' } },
+  });
+  y = (doc as any).lastAutoTable.finalY + 10;
+
+  // 7. Leave balances (only when balance data is present on the row)
+  const lbs: any[] = Array.isArray(row.leave_balances) ? row.leave_balances : [];
+  if (tpl.sections.leaveBalances?.enabled && lbs.length) {
+    doc.setTextColor(0, 0, 0);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(12);
+    doc.text(`${tpl.sections.leaveBalances.title || 'Leave Balances'} (as on ${fullMonthNames[row.month - 1]} ${row.year})`, pageWidth / 2, y, { align: 'center' });
+    autoTable(doc, {
+      startY: y + 3,
+      margin: { left: 28, right: 28 },
+      head: [['Leave Type', 'Opening', 'Allotted', 'Avail.', 'Encash.', 'Adjust.', 'Closing'].map(h => ({ content: h, styles: headStyle }))],
+      body: lbs.map(lb => [lb.type || lb.leave_type, lb.opening ?? 0, lb.allotted ?? 0, lb.availed ?? lb.avail ?? 0, lb.encashed ?? lb.encash ?? 0, lb.adjusted ?? lb.adjust ?? 0, lb.closing ?? 0]),
+      theme: 'grid',
+      styles: { ...base, halign: 'center' },
+    });
+    y = (doc as any).lastAutoTable.finalY + 6;
+  }
+
+  // 8. Reimbursements, remarks, prepared-by, generated-on
+  const footer = tpl.sections.footer || {};
+  doc.setTextColor(0, 0, 0);
+  if (footer.reimbursementsNote) {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.text('Reimbursements -', 14, y + 2);
+    const w = doc.getTextWidth('Reimbursements - ');
+    doc.setFont('times', 'normal');
+    doc.text(footer.reimbursementsNote, 14 + w, y + 2);
+    y += 12;
+  }
+  doc.setFont('times', 'normal');
+  doc.setFontSize(13);
+  doc.text('Remarks:', 14, y);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(6.5);
+  const remarks: string[] = footer.remarks || [];
+  remarks.forEach((remark: string, index: number) => {
+    doc.text(`- ${remark}`, 16, y + 5 + index * 3.8);
+  });
+  y += 5 + remarks.length * 3.8 + 6;
+  doc.setFont('times', 'normal');
+  doc.setFontSize(7.5);
+  if (footer.preparedBy) {
+    doc.text(`Prepared By: ${footer.preparedBy}`, 14, y);
+    y += 6;
+  }
+  if (footer.showGeneratedDate !== false) {
+    doc.text(`Generated on: ${fmtDate(new Date())}`, 14, y);
+  }
+
   return Buffer.from(doc.output('arraybuffer'));
 }
 
 export async function sendEmail({ to, subject, html, text, attachments }: { to: string; subject: string; html: string; text: string, attachments?: any[] }) {
   const settings = await getEmailSettings();
-  
+
   // Ensure 'to' is a valid email format to satisfy Resend/SMTP requirements
   const isValidEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
   if (!isValidEmail(to)) {
@@ -245,13 +479,13 @@ export async function sendEmail({ to, subject, html, text, attachments }: { to: 
     try {
       const maskedKey = resendApiKey.length > 5 ? `...${resendApiKey.slice(-5)}` : 'INVALID_KEY';
       console.log(`[EMAIL] Attempting Resend API send to ${to} (using key ending in ${maskedKey})`);
-      
+
       // Strict sender detection: ignore placeholders and invalid domains
       let emailFrom = settings.smtp_from || settings.company_email || process.env.EMAIL_FROM || 'onboarding@resend.dev';
-      
+
       // Clean the email address from 'Name <email>' format if needed for check
       const pureEmail = emailFrom.includes('<') ? emailFrom.match(/<([^>]+)>/)?.[1] || emailFrom : emailFrom;
-      
+
       if (pureEmail.toLowerCase().includes('acmecorp.com') || pureEmail.toLowerCase().includes('example.com') || !pureEmail.includes('@')) {
         console.warn(`[EMAIL] Placeholder domain detected (${pureEmail}). Forcing 'onboarding@resend.dev'`);
         emailFrom = 'onboarding@resend.dev';
@@ -283,7 +517,7 @@ export async function sendEmail({ to, subject, html, text, attachments }: { to: 
       } else {
         const errorMsg = responseData.message || 'Unknown Resend error';
         console.error(`[EMAIL] Resend API error:`, responseData);
-        
+
         // Throw specific error for domain issues so the UI can show it
         if (errorMsg.toLowerCase().includes('not verified') || response.status === 403) {
           throw new Error(`Domain Not Verified: Resend cannot send from "${pureEmail}". Please verify your domain in Resend dashboard or use "onboarding@resend.dev" in Settings.`);
@@ -347,7 +581,15 @@ router.post('/email/send', async (req, res) => {
              p.employee_id,
              p.payroll_id,
              e.name AS employee_name,
+             e.employee_code,
+             e.joining_date,
              e.email,
+             e.designation,
+             e.department,
+             e.site_location,
+             e.bank_name,
+             e.bank_account,
+             e.pan_number,
              pr.month,
              pr.year,
              pi.*
@@ -374,10 +616,10 @@ router.post('/email/send', async (req, res) => {
       const pdfBuffer = generatePayslipPdf(row, templateContent);
 
       try {
-        await sendEmail({ 
-          to: row.email, 
-          subject, 
-          html, 
+        await sendEmail({
+          to: row.email,
+          subject,
+          html,
           text,
           attachments: [{ filename: `Payslip_${row.employee_name}_${monthNames[row.month - 1]}.pdf`, content: pdfBuffer }]
         });
@@ -419,6 +661,14 @@ router.post('/email/resend/:logId', async (req, res) => {
              l.email,
              l.subject,
              e.name AS employee_name,
+             e.employee_code,
+             e.joining_date,
+             e.designation,
+             e.department,
+             e.site_location,
+             e.bank_name,
+             e.bank_account,
+             e.pan_number,
              pr.month,
              pr.year,
              pi.*,
@@ -444,10 +694,10 @@ router.post('/email/resend/:logId', async (req, res) => {
     const now = new Date();
 
     try {
-      await sendEmail({ 
-        to: row.email, 
-        subject, 
-        html, 
+      await sendEmail({
+        to: row.email,
+        subject,
+        html,
         text,
         attachments: [{ filename: `Payslip_${row.employee_name}_${monthNames[row.month - 1]}.pdf`, content: pdfBuffer }]
       });
@@ -469,7 +719,7 @@ router.post('/email/resend/:logId', async (req, res) => {
 
 router.post('/email/send-manual', async (req, res) => {
   const { employeeId, email, subject, body, payslipId, groupId } = req.body;
-  
+
   const client = createClient();
   try {
     await client.connect();
@@ -508,7 +758,7 @@ router.post('/email/send-manual', async (req, res) => {
 
       if (payslipId) {
         const query = `
-          SELECT e.name AS employee_name, pr.month, pr.year, pi.*
+          SELECT e.name AS employee_name, e.employee_code, e.joining_date, e.designation, e.department, e.bank_account, pr.month, pr.year, pi.*
           FROM payslips p
           JOIN employees e ON p.employee_id = e.id
           JOIN payrolls pr ON p.payroll_id = pr.id
@@ -525,12 +775,12 @@ router.post('/email/send-manual', async (req, res) => {
             </div>
           `;
           const pdfBuffer = generatePayslipPdf(row);
-          
+
           html = body ? `<div style="margin-bottom: 20px; font-family: sans-serif; line-height: 1.6;">${body.replace(/\n/g, '<br/>')}</div><hr />${payslipHtml}` : payslipHtml;
           text = `${body || ''}\n\n[Payslip PDF Attached]`;
           finalSubject = subject || `Payslip for ${monthNames[row.month - 1]} ${row.year}`;
           payrollId = row.payroll_id;
-          
+
           attachments = [{ filename: `Payslip_${row.employee_name}_${monthNames[row.month - 1]}.pdf`, content: pdfBuffer }];
         }
       }
@@ -563,7 +813,7 @@ router.post('/email/send-manual', async (req, res) => {
 });
 
 // Group Management Routes
-router.get('/email/groups', async (req, res) => {
+router.get('/email/groups', async (_req, res) => {
   const client = createClient();
   try {
     await client.connect();
@@ -578,7 +828,7 @@ router.get('/email/groups', async (req, res) => {
     console.error('[GROUPS] Load error:', error);
     res.status(500).json({ error: 'Failed to fetch groups' });
   } finally {
-    try { await client.end(); } catch (e) {}
+    try { await client.end(); } catch (e) { }
   }
 });
 
@@ -618,7 +868,7 @@ router.get('/email/groups/:id/members', async (req, res) => {
   await client.connect();
   try {
     const result = await client.query('SELECT employee_id FROM email_group_members WHERE group_id = $1', [req.params.id]);
-    res.json(result.rows.map(r => r.employee_id));
+    res.json(result.rows.map((r: any) => r.employee_id));
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch group members' });
   } finally {

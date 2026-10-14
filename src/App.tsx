@@ -11,6 +11,7 @@ import { DailyAnalysis } from './pages/DailyAnalysis';
 import { Employees } from './pages/Employees';
 import { Attendance } from './pages/Attendance';
 import { Payroll } from './pages/Payroll';
+import { Overtime } from './pages/Overtime';
 import { AdvanceManagement } from './pages/AdvanceManagement';
 import { Payslips } from './pages/Payslips';
 import { Reports } from './pages/Reports';
@@ -103,6 +104,7 @@ function AppContent() {
       <Route path="/employees" element={<AdminProtectedRoute pageId="employees"><Employees /></AdminProtectedRoute>} />
       <Route path="/attendance" element={<AdminProtectedRoute pageId="attendance"><Attendance /></AdminProtectedRoute>} />
       <Route path="/payroll" element={<AdminProtectedRoute pageId="payroll"><Payroll /></AdminProtectedRoute>} />
+      <Route path="/overtime" element={<AdminProtectedRoute pageId="overtime"><Overtime /></AdminProtectedRoute>} />
       <Route path="/advance-management" element={<AdminProtectedRoute pageId="advance-management"><AdvanceManagement /></AdminProtectedRoute>} />
       <Route path="/payslips" element={<AdminProtectedRoute pageId="payslips"><Payslips /></AdminProtectedRoute>} />
       <Route path="/reports" element={<AdminProtectedRoute pageId="reports"><Reports /></AdminProtectedRoute>} />

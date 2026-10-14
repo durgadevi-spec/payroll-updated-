@@ -7,6 +7,7 @@ import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
 import { calculatePayroll, formatCurrency, getCurrentMonth, getMonthName } from '../lib/payrollCalculator';
+import { getSalaryBreakdown } from '../lib/salaryBreakdown';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { Modal } from '../components/ui/Modal';
@@ -596,6 +597,7 @@ export function Payroll() {
 
       for (const emp of dataToUse.employees) {
         const monthlySalary = emp.ctc / 12;
+        const salaryBreakdown = getSalaryBreakdown(monthlySalary);
         let effectiveWorkingDays = workingDays;
         if (calculationType === 'working_days') {
           const totalDays = new Date(genYear, genMonth, 0).getDate();
@@ -673,6 +675,9 @@ export function Payroll() {
           payroll_id: newPayroll.id,
           employee_id: emp.id,
           monthly_salary: calc.monthlySalary,
+          hra: salaryBreakdown.hra,
+          conveyance: salaryBreakdown.conveyance,
+          medical: salaryBreakdown.medical,
           leave_deduction: calc.leaveDeduction,
           timesheet_deduction: calc.timesheetDeduction,
           missing_punches: effectiveMissingPunches,

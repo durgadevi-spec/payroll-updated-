@@ -146,6 +146,7 @@ export function MyPayslips() {
           <div className="space-y-4">
             <div className="border rounded-lg bg-white overflow-hidden shadow-sm">
               <PayslipDocument
+                domId="payslip-content"
                 payslip={viewPayslip}
                 templateContent={undefined}
                 editable={false}

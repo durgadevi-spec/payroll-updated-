@@ -7,6 +7,7 @@ import { payrollRouter } from './src/routes/payrollRoutes.ts';
 import { emailRouter } from './src/routes/emailRoutes.ts';
 import { selfServiceRouter } from './src/routes/selfServiceRoutes.ts';
 import { passwordResetRouter } from './src/routes/passwordResetRoutes.ts';
+import { overtimeRouter } from './src/routes/overtimeRoutes.ts';
 import { startNightlyAlertScheduler, runNightlyAlerts } from './src/jobs/nightlyAlerts.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -31,6 +32,7 @@ app.use((req, res, next) => {
 app.use('/api', payrollRouter);
 app.use('/api', emailRouter);
 app.use('/api', passwordResetRouter);
+app.use('/api', overtimeRouter); // must stay BEFORE selfServiceRouter (it forces employee login on everything after it)
 app.use('/api', selfServiceRouter);
 
 // Manual trigger for testing — POST /api/alerts/trigger

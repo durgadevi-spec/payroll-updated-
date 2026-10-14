@@ -853,11 +853,13 @@ router.post('/employees', async (req, res) => {
     reporting_manager = '',
     department = '',
     designation = '',
+    site_location = '',
     joining_date = null,
     relieving_date = null,
     bank_name = '',
     bank_account = '',
     ifsc_code = '',
+    pan_number = '',
     pf_number = '',
     esi_number = '',
     uan_number = '',
@@ -873,9 +875,9 @@ router.post('/employees', async (req, res) => {
   try {
     client = await payrollPool.connect();
     const insert = await client.query(
-      `INSERT INTO employees (name, email, employee_code, ctc, reporting_manager, department, designation, joining_date, relieving_date, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING *, TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date, TO_CHAR(relieving_date, 'YYYY-MM-DD') AS relieving_date`,
-      [name, email, employee_code || null, ctc, reporting_manager, department, designation, validJoiningDate, validRelievingDate, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance]
+      `INSERT INTO employees (name, email, employee_code, ctc, reporting_manager, department, designation, site_location, joining_date, relieving_date, bank_name, bank_account, ifsc_code, pan_number, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING *, TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date, TO_CHAR(relieving_date, 'YYYY-MM-DD') AS relieving_date`,
+      [name, email, employee_code || null, ctc, reporting_manager, department, designation, site_location, validJoiningDate, validRelievingDate, bank_name, bank_account, ifsc_code, pan_number, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance]
     );
 
     const employee = insert.rows[0];
@@ -903,11 +905,13 @@ router.put('/employees/:id', async (req, res) => {
     reporting_manager = '',
     department = '',
     designation = '',
+    site_location = '',
     joining_date = null,
     relieving_date = null,
     bank_name = '',
     bank_account = '',
     ifsc_code = '',
+    pan_number = '',
     pf_number = '',
     esi_number = '',
     uan_number = '',
@@ -923,9 +927,9 @@ router.put('/employees/:id', async (req, res) => {
   try {
     client = await payrollPool.connect();
     const update = await client.query(
-      `UPDATE employees SET name=$1, email=$2, employee_code=$3, ctc=$4, reporting_manager=$5, department=$6, designation=$7, joining_date=$8, relieving_date=$9, bank_name=$10, bank_account=$11, ifsc_code=$12, pf_number=$13, esi_number=$14, uan_number=$15, status=$16, use_pa_sla=$17, pa_sla_balance=$18, updated_at=NOW()
-       WHERE id=$19 RETURNING *, TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date, TO_CHAR(relieving_date, 'YYYY-MM-DD') AS relieving_date`,
-      [name, email, employee_code || null, ctc, reporting_manager, department, designation, validJoiningDate, validRelievingDate, bank_name, bank_account, ifsc_code, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance, id]
+      `UPDATE employees SET name=$1, email=$2, employee_code=$3, ctc=$4, reporting_manager=$5, department=$6, designation=$7, site_location=$8, joining_date=$9, relieving_date=$10, bank_name=$11, bank_account=$12, ifsc_code=$13, pan_number=$14, pf_number=$15, esi_number=$16, uan_number=$17, status=$18, use_pa_sla=$19, pa_sla_balance=$20, updated_at=NOW()
+       WHERE id=$21 RETURNING *, TO_CHAR(joining_date, 'YYYY-MM-DD') AS joining_date, TO_CHAR(relieving_date, 'YYYY-MM-DD') AS relieving_date`,
+      [name, email, employee_code || null, ctc, reporting_manager, department, designation, site_location, validJoiningDate, validRelievingDate, bank_name, bank_account, ifsc_code, pan_number, pf_number, esi_number, uan_number, status, use_pa_sla, pa_sla_balance, id]
     );
 
     const employee = update.rows[0];

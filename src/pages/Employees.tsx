@@ -340,10 +340,14 @@ export function Employees() {
                 { label: 'Annual CTC', value: formatCurrency(viewEmployee.ctc) },
                 { label: 'Monthly Salary', value: formatCurrency(viewEmployee.ctc / 12) },
                 { label: 'Reporting Manager', value: viewEmployee.reporting_manager || '—' },
+                { label: 'Designation', value: viewEmployee.designation || '—' },
+                { label: 'Site / Location', value: viewEmployee.site_location || '—' },
                 { label: 'PF Number', value: viewEmployee.pf_number || '—' },
                 { label: 'UAN Number', value: viewEmployee.uan_number || '—' },
+                { label: 'PAN Number', value: viewEmployee.pan_number || '—' },
                 { label: 'Bank', value: viewEmployee.bank_name || '—' },
                 { label: 'Account', value: viewEmployee.bank_account || '—' },
+                { label: 'IFSC Code', value: viewEmployee.ifsc_code || '—' },
               ].map(item => (
                 <div key={item.label} className="p-3 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
                   <p className="text-xs text-slate-400 mb-0.5">{item.label}</p>
