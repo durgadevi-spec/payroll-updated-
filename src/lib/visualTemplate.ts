@@ -79,6 +79,7 @@ export interface VisualPayslipData {
     previous_month_balance?: number;
     leave_deduction?: number;
     timesheet_deduction?: number;
+    missing_punch_deduction?: number;
     pf_deduction?: number;
     esi_deduction?: number;
     tax_deduction?: number;
@@ -92,13 +93,9 @@ const round2 = (v: number) => Math.round(v * 100) / 100;
 
 /** Raw value for a data key: a number for money keys, text otherwise. */
 export function resolveVisualValue(key: string | undefined, d: VisualPayslipData): number | string {
-    const salaryBreakdown = getSalaryBreakdown(d.monthly_salary ?? 0, {
-        hra: d.hra,
-        conveyance: d.conveyance,
-        medical: d.medical,
-    });
+    const salaryBreakdown = getSalaryBreakdown(d.monthly_salary ?? 0);
     const sundayEarnings = round2((n(d.monthly_salary) / (n(d.working_days) || 30)) * n(d.sunday_work_days));
-    const lop = n(d.leave_deduction) + n(d.timesheet_deduction);
+    const lop = n(d.leave_deduction) + n(d.timesheet_deduction) + n(d.missing_punch_deduction);
     const totalEarnings = n(d.monthly_salary) + sundayEarnings + n(d.bonus) + n(d.previous_month_balance);
     const totalDeductions = lop + n(d.pf_deduction) + n(d.esi_deduction) + n(d.tax_deduction) + n(d.loan_deduction) + n(d.advance_deduction);
     switch (key) {
@@ -115,7 +112,7 @@ export function resolveVisualValue(key: string | undefined, d: VisualPayslipData
         case 'calculation_days': return String(d.calculation_days ?? d.working_days ?? 0);
         case 'monthly_salary':
             return n(d.monthly_salary);
-        case 'basic_salary': return d.basic_salary ?? salaryBreakdown.basic_salary;
+        case 'basic_salary': return salaryBreakdown.basic_salary;
         case 'hra': return salaryBreakdown.hra;
         case 'conveyance': return salaryBreakdown.conveyance;
         case 'medical': return salaryBreakdown.medical;

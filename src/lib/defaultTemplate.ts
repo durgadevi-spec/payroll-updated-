@@ -26,6 +26,10 @@ export const DEFAULT_PAYSLIP_TEMPLATE: PayslipTemplateContent = {
         { label: 'Payable Days', key: 'working_days' },
       ],
     },
+    attendanceDetails: {
+      enabled: true,
+      title: '2. Attendance Details',
+    },
     earnings: {
       title: 'EARNINGS',
       rows: [

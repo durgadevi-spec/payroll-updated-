@@ -121,8 +121,10 @@ export interface PayslipFull {
     year: number;
     status: string;
   };
-  payroll_item: Pick<PayrollItem, 'id' | 'employee_id' | 'monthly_salary' | 'leave_deduction' | 'timesheet_deduction' | 'pf_deduction' | 'esi_deduction' | 'tax_deduction' | 'loan_deduction' | 'bonus' | 'net_salary' | 'working_days' | 'unpaid_leaves'> & {
+  payroll_item: Pick<PayrollItem, 'id' | 'employee_id' | 'monthly_salary' | 'leave_deduction' | 'timesheet_deduction' | 'missing_punch_deduction' | 'pf_deduction' | 'esi_deduction' | 'tax_deduction' | 'loan_deduction' | 'bonus' | 'net_salary' | 'working_days' | 'unpaid_leaves'> & {
     advance_deduction?: number;
+    missing_punches?: number;
+    missing_punch_exception_dates?: string[];
     sunday_work_days?: number;
     previous_month_balance?: number;
     calculation_type?: PayrollItem['calculation_type'];

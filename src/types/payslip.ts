@@ -67,6 +67,10 @@ export interface PayslipTemplateContent {
       enabled: boolean;
       fields: { label: string; key: string }[];
     };
+    attendanceDetails?: {
+      enabled: boolean;
+      title: string;
+    };
     earnings: {
       title: string;
       rows: PayslipTemplateRow[];

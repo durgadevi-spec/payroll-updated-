@@ -121,11 +121,7 @@ export function renderVisualTemplate(row: any, templateContent: any) {
   safeAddImage(doc, cfg.backgroundImage, 0, 0, pageWidth, pageHeight);
 
   const grossSalary = Number(row.monthly_salary ?? row.basic_salary ?? 0);
-  const salaryBreakdown = getSalaryBreakdown(grossSalary, {
-    hra: row.hra,
-    conveyance: row.conveyance,
-    medical: row.medical,
-  });
+  const salaryBreakdown = getSalaryBreakdown(grossSalary);
   const data: VisualPayslipData = {
     employee_name: row.employee_name,
     employee_code: String(row.employee_code || row.employee_id || ''),
@@ -149,6 +145,7 @@ export function renderVisualTemplate(row: any, templateContent: any) {
     previous_month_balance: row.previous_month_balance,
     leave_deduction: row.leave_deduction,
     timesheet_deduction: row.timesheet_deduction,
+    missing_punch_deduction: row.missing_punch_deduction,
     pf_deduction: row.pf_deduction,
     esi_deduction: row.esi_deduction,
     tax_deduction: row.tax_deduction,
@@ -213,11 +210,7 @@ export function renderVisualTemplate(row: any, templateContent: any) {
 function generatePayslipPdf(row: any, templateContent?: any) {
   const doc = new jsPDF();
   const basicSalary = Number(row.monthly_salary ?? row.basic_salary ?? 0);
-  const salaryBreakdown = getSalaryBreakdown(basicSalary, {
-    hra: row.hra,
-    conveyance: row.conveyance,
-    medical: row.medical,
-  });
+  const salaryBreakdown = getSalaryBreakdown(basicSalary);
   const prevBalance = Number(row.previous_month_balance || 0);
   const pageWidth = doc.internal.pageSize.getWidth();
 
@@ -317,6 +310,39 @@ function generatePayslipPdf(row: any, templateContent?: any) {
     y = (doc as any).lastAutoTable.finalY + 10;
   }
 
+  if (tpl.sections.attendanceDetails?.enabled) {
+    const workingDays = Number(row.working_days || 0);
+    const exceptionDates = Array.isArray(row.missing_punch_exception_dates)
+      ? row.missing_punch_exception_dates
+      : [];
+    const deductibleMissingPunchDays = Math.max(
+      0,
+      Number(row.missing_punches || 0) - exceptionDates.length,
+    );
+    const lopDays = Number(row.unpaid_leaves || 0) + deductibleMissingPunchDays;
+    const presentDays = Math.max(0, workingDays - lopDays);
+    const formatDays = (days: number) => days.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.text(tpl.sections.attendanceDetails.title || '2. Attendance Details', 22, y);
+    autoTable(doc, {
+      startY: y + 2,
+      margin: { left: 22, right: 22 },
+      body: [[
+        { content: 'No. of Days', styles: { fontStyle: 'bold' } },
+        formatDays(workingDays),
+        { content: 'No. of Days Present', styles: { fontStyle: 'bold' } },
+        formatDays(presentDays),
+        { content: 'LOP Days', styles: { fontStyle: 'bold' } },
+        formatDays(lopDays),
+      ]],
+      theme: 'grid',
+      styles: base,
+      columnStyles: { 0: { cellWidth: 30 }, 1: { cellWidth: 25 }, 2: { cellWidth: 30 }, 3: { cellWidth: 25 }, 4: { cellWidth: 25 }, 5: { cellWidth: 'auto' } },
+    });
+    y = (doc as any).lastAutoTable.finalY + 10;
+  }
+
   // 5. Earnings & Deductions
   const perDaySalary = (basicSalary || 0) / (row.working_days || 26);
   const sundayEarnings = Math.round(perDaySalary * (row.sunday_work_days || 0) * 100) / 100;
@@ -335,9 +361,9 @@ function generatePayslipPdf(row: any, templateContent?: any) {
     if (key === 'ot_allowance') return Number(row.ot_allowance || 0);
     return 0;
   };
-  const totalDed = Number(row.leave_deduction || 0) + Number(row.timesheet_deduction || 0) + Number(row.pf_deduction || 0) + Number(row.esi_deduction || 0) + Number(row.tax_deduction || 0) + Number(row.loan_deduction || 0) + Number(row.advance_deduction || 0);
+  const totalDed = Number(row.leave_deduction || 0) + Number(row.timesheet_deduction || 0) + Number(row.missing_punch_deduction || 0) + Number(row.pf_deduction || 0) + Number(row.esi_deduction || 0) + Number(row.tax_deduction || 0) + Number(row.loan_deduction || 0) + Number(row.advance_deduction || 0);
   const dedValue = (key: string) => {
-    if (key === 'leave_deduction' || key === 'lop') return Number(row.leave_deduction || 0) + Number(row.timesheet_deduction || 0);
+    if (key === 'leave_deduction' || key === 'lop') return Number(row.leave_deduction || 0) + Number(row.timesheet_deduction || 0) + Number(row.missing_punch_deduction || 0);
     if (key === 'pf_deduction' || key === 'pf') return Number(row.pf_deduction || 0);
     if (key === 'esi_deduction' || key === 'esi') return Number(row.esi_deduction || 0);
     if (key === 'tax_deduction' || key === 'tax') return Number(row.tax_deduction || 0);

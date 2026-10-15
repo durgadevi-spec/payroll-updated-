@@ -152,11 +152,7 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
   const perDaySalary = (item.monthly_salary || 0) / (item.working_days || 30);
   const sundayEarnings = Math.round(perDaySalary * (item.sunday_work_days || 0) * 100) / 100;
   const itemAny = item as any;
-  const salaryBreakdown = getSalaryBreakdown(item.monthly_salary || 0, {
-    hra: itemAny.hra,
-    conveyance: itemAny.conveyance,
-    medical: itemAny.medical,
-  });
+  const salaryBreakdown = getSalaryBreakdown(item.monthly_salary || 0);
 
   const earnings: PayslipRow[] = tpl.sections.earnings.rows.map(row => {
     let value = 0;
@@ -191,13 +187,15 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
 
   const deductions: PayslipRow[] = tpl.sections.deductions.rows.map(row => {
     let value = 0;
-    if (row.key === 'lop' || row.key === 'leave_deduction') value = (item.leave_deduction || 0) + (item.timesheet_deduction || 0);
+    if (row.key === 'lop' || row.key === 'leave_deduction') {
+      value = (item.leave_deduction || 0) + (item.timesheet_deduction || 0) + Number(itemAny.missing_punch_deduction || 0);
+    }
     else if (row.key === 'pf' || row.key === 'pf_deduction') value = item.pf_deduction;
     else if (row.key === 'esi' || row.key === 'esi_deduction') value = item.esi_deduction;
     else if (row.key === 'tax' || row.key === 'tax_deduction') value = item.tax_deduction;
     else if (row.key === 'loan' || row.key === 'loan_deduction') value = item.loan_deduction;
     else if (row.key === 'advance' || row.key === 'advance_deduction') value = item.advance_deduction || 0;
-    else if (row.key === 'total_deductions') value = (item.leave_deduction || 0) + (item.timesheet_deduction || 0) + (item.pf_deduction || 0) + (item.esi_deduction || 0) + (item.tax_deduction || 0) + (item.loan_deduction || 0) + (item.advance_deduction || 0);
+    else if (row.key === 'total_deductions') value = (item.leave_deduction || 0) + (item.timesheet_deduction || 0) + Number(itemAny.missing_punch_deduction || 0) + (item.pf_deduction || 0) + (item.esi_deduction || 0) + (item.tax_deduction || 0) + (item.loan_deduction || 0) + (item.advance_deduction || 0);
     return { label: row.label, value, key: row.key, hideIfZero: row.hideIfZero, isTotal: row.isTotal };
   });
 
@@ -297,6 +295,17 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
   const netPay = item.net_salary || 0;
   const netWords = `Rupees ${numberToWords(Math.round(netPay)).replace(/\s*Rupees$/, '')} only`;
   const footer = tpl.sections.footer;
+  const attendanceWorkingDays = Number(item.working_days || 0);
+  const missingPunchExceptionCount = Array.isArray(itemAny.missing_punch_exception_dates)
+    ? itemAny.missing_punch_exception_dates.length
+    : 0;
+  const deductibleMissingPunchDays = Math.max(
+    0,
+    Number(itemAny.missing_punches || 0) - missingPunchExceptionCount,
+  );
+  const attendanceLopDays = Number(item.unpaid_leaves || 0) + deductibleMissingPunchDays;
+  const attendancePresentDays = Math.max(0, attendanceWorkingDays - attendanceLopDays);
+  const formatDays = (days: number) => days.toLocaleString('en-IN', { maximumFractionDigits: 2 });
 
   const th = `${border} bg-[#d9d9d9] px-2 py-1.5 text-[11px] font-bold`;
   const td = `${border} px-2 py-1.5 text-[11px]`;
@@ -364,6 +373,28 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
               ))}
             </tbody>
           </table>
+        )}
+
+        {tpl.sections.attendanceDetails?.enabled && (
+          <section className="mb-8">
+            <h3 className="text-[14px] font-bold mb-2" style={{ fontFamily: sans }}>{tpl.sections.attendanceDetails.title || '2. Attendance Details'}</h3>
+            <table className="w-full border-collapse table-fixed">
+              <tbody>
+                <tr>
+                  {[
+                    { label: 'No. of Days', value: attendanceWorkingDays },
+                    { label: 'No. of Days Present', value: attendancePresentDays },
+                    { label: 'LOP Days', value: attendanceLopDays },
+                  ].map(({ label, value }) => (
+                    <React.Fragment key={label}>
+                      <td className={`${td} font-bold`}>{label}</td>
+                      <td className={`${td} text-center`}>{formatDays(value)}</td>
+                    </React.Fragment>
+                  ))}
+                </tr>
+              </tbody>
+            </table>
+          </section>
         )}
 
         {/* Earnings | Deductions */}

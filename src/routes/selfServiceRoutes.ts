@@ -156,7 +156,7 @@ selfServiceRouter.get('/me/payslips', async (req: AuthenticatedRequest, res: Res
       SELECT ps.*, 
              e.id as emp_id, e.employee_code, e.joining_date, e.name as emp_name, e.email as emp_email, e.designation, e.department, e.bank_account, e.pf_number, e.uan_number,
              p.id as pr_id, p.month, p.year, p.status as pr_status,
-             pi.monthly_salary, pi.leave_deduction, pi.timesheet_deduction, pi.pf_deduction, pi.esi_deduction, pi.tax_deduction, pi.loan_deduction, pi.advance_deduction, pi.sunday_work_days, pi.bonus, pi.previous_month_balance, pi.hra, pi.conveyance, pi.medical, pi.ot_allowance, pi.leave_balances, pi.net_salary, pi.working_days, pi.unpaid_leaves
+             pi.monthly_salary, pi.leave_deduction, pi.timesheet_deduction, pi.missing_punch_deduction, pi.pf_deduction, pi.esi_deduction, pi.tax_deduction, pi.loan_deduction, pi.advance_deduction, pi.sunday_work_days, pi.bonus, pi.previous_month_balance, pi.hra, pi.conveyance, pi.medical, pi.ot_allowance, pi.leave_balances, pi.net_salary, pi.working_days, pi.unpaid_leaves, pi.missing_punches, pi.missing_punch_exception_dates
       FROM payslips ps
       JOIN employees e ON ps.employee_id = e.id
       JOIN payrolls p ON ps.payroll_id = p.id
@@ -176,10 +176,11 @@ selfServiceRouter.get('/me/payslips', async (req: AuthenticatedRequest, res: Res
       employee: { id: r.emp_id, employee_code: r.employee_code, joining_date: r.joining_date, name: r.emp_name, email: r.emp_email, designation: r.designation, department: r.department, bank_account: r.bank_account, pf_number: r.pf_number, uan_number: r.uan_number },
       payroll: { id: r.pr_id, month: r.month, year: r.year, status: r.pr_status },
       payroll_item: {
-        monthly_salary: r.monthly_salary, leave_deduction: r.leave_deduction, timesheet_deduction: r.timesheet_deduction,
+        monthly_salary: r.monthly_salary, leave_deduction: r.leave_deduction, timesheet_deduction: r.timesheet_deduction, missing_punch_deduction: r.missing_punch_deduction,
         pf_deduction: r.pf_deduction, esi_deduction: r.esi_deduction, tax_deduction: r.tax_deduction, loan_deduction: r.loan_deduction,
         advance_deduction: r.advance_deduction, sunday_work_days: r.sunday_work_days, bonus: r.bonus, previous_month_balance: r.previous_month_balance, hra: r.hra, conveyance: r.conveyance, medical: r.medical, ot_allowance: r.ot_allowance, leave_balances: r.leave_balances, net_salary: r.net_salary,
-        working_days: r.working_days, unpaid_leaves: r.unpaid_leaves
+        working_days: r.working_days, unpaid_leaves: r.unpaid_leaves,
+        missing_punches: r.missing_punches, missing_punch_exception_dates: r.missing_punch_exception_dates
       }
     }));
 

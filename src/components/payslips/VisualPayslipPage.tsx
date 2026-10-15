@@ -61,6 +61,7 @@ export function payslipToVisualData(payslip: PayslipFull): VisualPayslipData {
         previous_month_balance: item.previous_month_balance,
         leave_deduction: item.leave_deduction,
         timesheet_deduction: item.timesheet_deduction,
+        missing_punch_deduction: item.missing_punch_deduction,
         pf_deduction: item.pf_deduction,
         esi_deduction: item.esi_deduction,
         tax_deduction: item.tax_deduction,
