@@ -9,6 +9,8 @@ import { selfServiceRouter } from './src/routes/selfServiceRoutes.ts';
 import { passwordResetRouter } from './src/routes/passwordResetRoutes.ts';
 import { overtimeRouter } from './src/routes/overtimeRoutes.ts';
 import { startNightlyAlertScheduler, runNightlyAlerts } from './src/jobs/nightlyAlerts.ts';
+import { autoPayrollRouter } from './src/routes/autoPayrollRoutes.ts';
+import { startAutoPayrollScheduler } from './src/services/autoPayroll.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,6 +32,7 @@ app.use((req, res, next) => {
 
 
 app.use('/api', payrollRouter);
+app.use('/api', autoPayrollRouter); // Auto-Generate Payroll settings (additive)
 app.use('/api', emailRouter);
 app.use('/api', passwordResetRouter);
 app.use('/api', overtimeRouter); // must stay BEFORE selfServiceRouter (it forces employee login on everything after it)
@@ -67,4 +70,5 @@ app.get('*', (req, res) => {
 app.listen(PORT, () => {
   console.log(`Payroll API server listening on http://localhost:${PORT}`);
   startNightlyAlertScheduler();
+  startAutoPayrollScheduler();
 });

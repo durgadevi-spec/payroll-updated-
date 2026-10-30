@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
-import { Save, Building2, CreditCard, Shield, Mail, Users2, Pencil, Trash2, Plus, X, Check, Bell, Calendar } from 'lucide-react';
+import { Save, Building2, CreditCard, Shield, Mail, Users2, Pencil, Trash2, Plus, X, Check, Bell, Calendar, Play } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { Input } from '../components/ui/Input';
+import { AutoPayrollSettings } from '../components/settings/AutoPayrollSettings';
 
 interface SettingsMap {
   company_name: string;
@@ -54,7 +55,7 @@ export function Settings() {
   const [settings, setSettings] = useState<SettingsMap>(defaultSettings);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [activeTab, setActiveTab] = useState<'company' | 'payroll' | 'smtp' | 'departments' | 'holidays'>('company');
+  const [activeTab, setActiveTab] = useState<'company' | 'payroll' | 'smtp' | 'departments' | 'holidays' | 'autopayroll'>('company');
 
   // Department state
   const [departments, setDepartments] = useState<Department[]>([]);
@@ -201,6 +202,7 @@ export function Settings() {
     { id: 'smtp' as const, label: 'Email / SMTP', icon: <Mail size={15} /> },
     { id: 'departments' as const, label: 'Departments', icon: <Users2 size={15} /> },
     { id: 'holidays' as const, label: 'Holidays', icon: <Calendar size={15} /> },
+    { id: 'autopayroll' as const, label: 'Auto Payroll', icon: <Play size={15} /> },
   ];
 
   if (loading) {
@@ -216,7 +218,7 @@ export function Settings() {
   }
 
   return (
-    <div className="space-y-5 max-w-3xl">
+    <div className="space-y-5 w-full max-w-4xl">
       <div className="flex items-center justify-between">
         <p className="text-slate-500 dark:text-slate-400 text-sm">Configure system preferences and integrations</p>
         <Button icon={<Save size={15} />} loading={saving} onClick={saveSettings}>
@@ -225,12 +227,12 @@ export function Settings() {
       </div>
 
       <Card padding={false}>
-        <div className="flex border-b border-slate-200 dark:border-slate-700">
+        <div className="flex overflow-x-auto border-b border-slate-200 dark:border-slate-700">
           {tabs.map(tab => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 px-5 py-3.5 text-sm font-medium transition-colors border-b-2 ${
+              className={`flex items-center gap-2 px-5 py-3.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 ${
                 activeTab === tab.id
                   ? 'border-blue-600 text-blue-600 dark:text-blue-400'
                   : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
@@ -283,6 +285,8 @@ export function Settings() {
               </div>
             </>
           )}
+
+          {activeTab === 'autopayroll' && <AutoPayrollSettings />}
 
           {activeTab === 'payroll' && (
             <>

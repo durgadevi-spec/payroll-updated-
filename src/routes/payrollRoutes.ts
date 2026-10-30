@@ -317,7 +317,7 @@ router.delete('/departments/:id', async (req, res) => {
 // returns how many of that month's calendar days the employee was actually
 // employed for. Mirrors the identical helper in src/pages/Payroll.tsx so the
 // dashboard projection and the real generated payslip always agree.
-function getEligibleDaysForMonthServer(
+export function getEligibleDaysForMonthServer(
   joiningDate: string | null | undefined,
   month: number,
   year: number,
@@ -1187,7 +1187,7 @@ router.get('/diagnose-lms', async (req, res) => {
 // "paid vs unpaid" day classification (approved leaves = no deduction, etc.). Used by both
 // the /payroll/generation-preview endpoint (Payroll page) and /payroll-processing endpoint
 // (Admin Panel dashboard) so both surfaces agree on the same numbers.
-async function computePayrollPreviewData(employeeIds: string[], month: number, year: number) {
+export async function computePayrollPreviewData(employeeIds: string[], month: number, year: number) {
   let pClient, lmsClient, tsClient;
   try {
     pClient = await payrollPool.connect();
