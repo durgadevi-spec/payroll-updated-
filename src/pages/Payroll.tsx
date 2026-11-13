@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import ExcelJS from 'exceljs';
-import { Calculator, Play, ChevronDown, ChevronUp, CheckCircle2, DollarSign, AlertTriangle, Trash2, Eye, Edit2, FileSpreadsheet, Info, X, RefreshCw, FileText, Maximize2, Minimize2, ShieldCheck, Lock, Unlock } from 'lucide-react';
+import { Calculator, Play, ChevronDown, ChevronUp, CheckCircle2, DollarSign, AlertTriangle, Trash2, Eye, Edit2, FileSpreadsheet, Info, X, RefreshCw, FileText, Download, Maximize2, Minimize2, ShieldCheck, Lock, Unlock } from 'lucide-react';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import { PreGenerationAnalysisModal } from '../components/PreGenerationAnalysisModal';
 import { Payroll as PayrollType, PayrollItem, Employee } from '../types/index';
 import { supabase } from '../lib/supabase';
@@ -17,6 +19,20 @@ import { Select } from '../components/ui/Input';
 
 interface PayrollItemWithEmployee extends PayrollItem {
   employee: Employee;
+  leave_type?: string | null;
+  leave_dates?: string[];
+  total_leaves?: number;
+  paid_leaves?: number;
+  paid_by_balance_dates?: string[];
+  unpaid_leave_details?: { date: string; days: number }[];
+  leave_details?: { date: string; type: string; days: number; status: string }[];
+  missing_dates?: string[];
+  attendance_dates?: string[];
+  incomplete_punch_dates?: string[];
+  incomplete_punch_times?: Record<string, string>;
+  holiday_dates?: string[];
+  sandwich_dates?: string[];
+  sandwich_deduction_amount?: number;
 }
 
 const getItemDaysForRate = (item: PayrollItemWithEmployee) => {
@@ -261,6 +277,7 @@ export function Payroll() {
   const [loading, setLoading] = useState(true);
   const [selectedPayroll, setSelectedPayroll] = useState<PayrollType | null>(null);
   const [payrollItems, setPayrollItems] = useState<PayrollItemWithEmployee[]>([]);
+  const [employeeReportItem, setEmployeeReportItem] = useState<PayrollItemWithEmployee | null>(null);
   const [loadingItems, setLoadingItems] = useState(false);
   // Tracks the most recently requested payroll id for loadPayrollItems, so a
   // slow/out-of-order response for a payroll the user has since navigated
@@ -1118,6 +1135,352 @@ export function Payroll() {
     }
   }
 
+  function getEmployeeDeductionLines(item: PayrollItemWithEmployee, payroll: PayrollType) {
+    type DeductionLine = { date: string; reason: string; calculation: string; amount: number };
+    const lines: DeductionLine[] = [];
+    const addLine = (date: string, reason: string, calculation: string, amount: number) => {
+      if (amount > 0) lines.push({ date, reason, calculation, amount });
+    };
+    const addAllocatedLines = (
+      details: { date: string; days?: number }[],
+      reason: string,
+      calculation: (days: number, amount: number) => string,
+      total: number
+    ) => {
+      if (total <= 0 || details.length === 0) return false;
+      const weights = details.map(detail => Math.max(0, detail.days ?? 1));
+      const weightTotal = weights.reduce((sum, weight) => sum + weight, 0);
+      if (weightTotal <= 0) return false;
+      const totalCents = Math.round(total * 100);
+      let allocatedCents = 0;
+      details.forEach((detail, index) => {
+        const cents = index === details.length - 1
+          ? totalCents - allocatedCents
+          : Math.min(Math.round(totalCents * weights[index] / weightTotal), totalCents - allocatedCents);
+        allocatedCents += cents;
+        const amount = cents / 100;
+        addLine(
+          formatReportDate(detail.date),
+          reason,
+          calculation(weights[index], amount),
+          amount
+        );
+      });
+      return true;
+    };
+
+    const unpaidLeaveDetails = item.unpaid_leave_details || [];
+    const leaveDeduction = safeNumber(item.leave_deduction);
+    if (!addAllocatedLines(
+      unpaidLeaveDetails,
+      'Unpaid leave',
+      (days, amount) => `${days} unpaid leave day(s); allocated from the payroll leave deduction (INR ${formatCurrency(amount)})`,
+      leaveDeduction
+    )) {
+      addLine(
+        'Payroll period',
+        'Unpaid leave deduction',
+        `${safeNumber(item.unpaid_leaves)} unpaid day(s); date-level amount is not retained in the payroll record`,
+        leaveDeduction
+      );
+    }
+
+    const timesheetDeduction = getTimesheetDeduction(item);
+    const missingTimesheetDates = item.missing_dates || [];
+    const payableTimesheetDays = getTimesheetPayableMissingDays(item);
+    const timesheetExceptionDays = getTimesheetExceptionDaysApplied(item);
+    if (timesheetDeduction > 0) {
+      if (timesheetExceptionDays === 0 && missingTimesheetDates.length === payableTimesheetDays && missingTimesheetDates.length > 0) {
+        addAllocatedLines(
+          missingTimesheetDates.map(date => ({ date })),
+          'Timesheet not submitted',
+          (_days, amount) => `Generated timesheet deduction allocated across ${payableTimesheetDays} payable day(s); INR ${formatCurrency(amount)} for this date`,
+          timesheetDeduction
+        );
+      } else {
+        addLine(
+          missingTimesheetDates.length
+            ? `Multiple dates (${missingTimesheetDates.map(formatReportDate).join(', ')}); waived dates not specified`
+            : 'Payroll period',
+          'Timesheet not submitted',
+          `${payableTimesheetDays} payable missing day(s); using the generated payroll deduction${timesheetExceptionDays > 0 ? ` after ${timesheetExceptionDays} waived day(s)` : ''}`,
+          timesheetDeduction
+        );
+      }
+    }
+
+    const missingPunchDeduction = getMissingPunchDeduction(item);
+    const exceptedPunchDates = new Set(getMissingPunchExceptionDates(item));
+    const payablePunchDates = (item.missing_punch_dates || []).filter(date => !exceptedPunchDates.has(date));
+    if (!addAllocatedLines(
+      payablePunchDates.map(date => ({ date })),
+      'Missing punch',
+      (_days, amount) => `Generated missing-punch deduction allocated across ${payablePunchDates.length} payable day(s); INR ${formatCurrency(amount)} for this date`,
+      missingPunchDeduction
+    )) {
+      addLine(
+        'Payroll period',
+        'Missing punch',
+        `${safeNumber(item.missing_punches)} missing-punch day(s); date-level amount is not retained in the payroll record`,
+        missingPunchDeduction
+      );
+    }
+
+    const sandwichDates = item.sandwich_dates || [];
+    addAllocatedLines(
+      sandwichDates.map(date => ({ date })),
+      'Sunday sandwich deduction',
+      (_days, amount) => `Generated sandwich deduction allocated across ${sandwichDates.length} day(s); INR ${formatCurrency(amount)} for this date`,
+      safeNumber(item.sandwich_deduction_amount)
+    );
+
+    const period = `${getMonthName(payroll.month)} ${payroll.year}`;
+    const fixedDeductions: { reason: string; amount: number; calculation: string }[] = [
+      { reason: 'Approved permission / permission shortfall', amount: safeNumber(item.permission_deduction), calculation: `${safeNumber(item.permission_hours)} permission hour(s); generated deduction` },
+      { reason: 'Late attendance / insufficient daily hours', amount: safeNumber(item.hourly_deduction), calculation: `${safeNumber(item.hourly_short_hours)} deductible hour(s); daily date-level allocation is not retained in the payroll record` },
+      { reason: 'Salary advance repayment', amount: safeNumber(item.advance_deduction), calculation: 'Amount recorded on the generated payroll item' },
+      { reason: 'Provident Fund', amount: safeNumber(item.pf_deduction), calculation: 'Amount recorded on the generated payroll item' },
+      { reason: 'Employee State Insurance', amount: safeNumber(item.esi_deduction), calculation: 'Amount recorded on the generated payroll item' },
+      { reason: 'Tax', amount: safeNumber(item.tax_deduction), calculation: 'Amount recorded on the generated payroll item' },
+      { reason: 'Loan repayment', amount: safeNumber(item.loan_deduction), calculation: 'Amount recorded on the generated payroll item' },
+    ];
+    fixedDeductions.forEach(deduction => {
+      addLine(period, deduction.reason, deduction.calculation, deduction.amount);
+    });
+    return lines;
+  }
+
+  function formatReportDate(value: string) {
+    if (!value || value === 'Payroll period') return value;
+    const date = new Date(`${value}T00:00:00`);
+    return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('en-IN');
+  }
+
+  function formatReportAmount(amount: number) {
+    return new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
+  }
+
+  async function downloadEmployeeSalaryReport(payroll: PayrollType, item: PayrollItemWithEmployee, format: 'pdf' | 'excel') {
+    try {
+      const employee = item.employee;
+      const name = employee?.name || 'Employee';
+      const safeName = name.replace(/[^a-z0-9-_]+/gi, '_');
+      const monthName = `${getMonthName(payroll.month)}_${payroll.year}`;
+      const salary = getSalaryBreakdown(safeNumber(item.monthly_salary));
+      const netSalary = getNetSalary(item, payroll.month, payroll.year);
+      const deductionLines = getEmployeeDeductionLines(item, payroll);
+      const totalDeductions = deductionLines.reduce((sum, line) => sum + line.amount, 0);
+      const calendarDays = new Date(payroll.year, payroll.month, 0).getDate();
+      const calculationDays = safeNumber(item.calculation_days) || safeNumber(item.working_days) || calendarDays;
+      const attendanceDates = item.attendance_dates || [];
+      const incompletePunchDates = item.incomplete_punch_dates || [];
+      const incompletePunchTimes = item.incomplete_punch_times || {};
+      const leaveDates = item.leave_dates || [];
+      const missingTimesheetDates = item.missing_dates || [];
+      const missingPunchDates = item.missing_punch_dates || [];
+      const holidayDates = item.holiday_dates || [];
+      const isCustom = item.calculation_type === 'custom';
+      const isWorkingDays = item.calculation_type === 'working_days';
+      const daysForRate = isWorkingDays ? safeNumber(item.working_days) || 26 : calendarDays;
+      const daysToPay = isCustom && safeNumber(item.calculation_days) > 0
+        ? safeNumber(item.calculation_days)
+        : isWorkingDays ? daysForRate : calendarDays;
+      const perDaySalary = safeNumber(item.monthly_salary) / daysForRate;
+      const sundayEarnings = perDaySalary * safeNumber(item.sunday_work_days);
+      const basePayable = perDaySalary * daysToPay;
+      const grossPayable = basePayable + sundayEarnings + safeNumber(item.bonus) + safeNumber(item.previous_month_balance);
+      const salaryProration = safeNumber(item.monthly_salary) > 0 ? basePayable / safeNumber(item.monthly_salary) : 0;
+      const leaveLines = deductionLines.filter(line => line.reason.toLowerCase().includes('leave'));
+      const timesheetLines = deductionLines.filter(line => line.reason.toLowerCase().includes('timesheet'));
+      const punchLines = deductionLines.filter(line => line.reason.toLowerCase().includes('punch'));
+      const otherDeductionLines = deductionLines.filter(line => !leaveLines.includes(line) && !timesheetLines.includes(line) && !punchLines.includes(line));
+      const leaveRows = (item.leave_details || []).map(leaveDetail => {
+        const date = leaveDetail.date;
+        const leaveLine = leaveLines.find(line => line.date === formatReportDate(date));
+        return [
+          formatReportDate(date),
+          `${leaveDetail.type || item.leave_type || 'Leave'} - ${leaveDetail.status}`,
+          leaveLine?.calculation || `${leaveDetail.days} day(s); no leave deduction recorded`,
+          leaveLine ? formatReportAmount(leaveLine.amount) : '—',
+        ];
+      });
+      if (leaveRows.length === 0 && (safeNumber(item.total_leaves) > 0 || safeNumber(item.unpaid_leaves) > 0 || leaveDates.length > 0)) {
+        leaveRows.push([
+          'Payroll period',
+          'Leave totals (date-level status unavailable)',
+          `${safeNumber(item.total_leaves) || leaveDates.length} total day(s); ${safeNumber(item.paid_leaves)} paid; ${safeNumber(item.unpaid_leaves)} unpaid. ${leaveDates.length} leave date(s) are in the snapshot, but their individual status was not retained.`,
+          leaveLines.length ? formatReportAmount(leaveLines.reduce((sum, line) => sum + line.amount, 0)) : '—',
+        ]);
+      }
+      const reportRows = (lines: typeof deductionLines) => lines.map(line => [
+        line.date,
+        line.reason,
+        line.calculation,
+        formatReportAmount(line.amount),
+      ]);
+      const reportColumns = ['Date / Component', 'Reason / Details', 'Calculation', 'Amount (INR)'];
+      const attendanceRows = [
+        ['Payroll calculation', `${calculationDays} payable days`, `${safeNumber(item.working_days)} working days recorded`, '—'],
+        ['Complete punches', `${attendanceDates.length} date(s)`, attendanceDates.map(formatReportDate).join(', ') || 'No dates available', '—'],
+        ['Incomplete punches', `${incompletePunchDates.length} date(s)`, incompletePunchDates.map(date => `${formatReportDate(date)}${incompletePunchTimes[date] ? ` at ${incompletePunchTimes[date]}` : ''}`).join(', ') || 'None recorded', '—'],
+        ['Holidays', `${safeNumber(item.holiday_count)} day(s)`, holidayDates.map(formatReportDate).join(', ') || 'No dates available', '—'],
+      ];
+      const salaryRows = [
+        ['Basic salary', formatReportAmount(salary.basic_salary), formatReportAmount(salary.basic_salary * salaryProration), ''],
+        ['HRA', formatReportAmount(salary.hra), formatReportAmount(salary.hra * salaryProration), ''],
+        ['Conveyance', formatReportAmount(salary.conveyance), formatReportAmount(salary.conveyance * salaryProration), ''],
+        ['Medical allowance', formatReportAmount(salary.medical), formatReportAmount(salary.medical * salaryProration), ''],
+        ['Special allowance', formatReportAmount(salary.special_allowance), formatReportAmount(salary.special_allowance * salaryProration), ''],
+        ['Monthly salary', formatReportAmount(item.monthly_salary), formatReportAmount(item.monthly_salary), `${calculationDays} calculation days`],
+        ['Sunday / OD earnings', formatReportAmount(sundayEarnings), formatReportAmount(sundayEarnings), `${safeNumber(item.sunday_work_days)} day(s)`],
+        ['Bonus', formatReportAmount(item.bonus), formatReportAmount(item.bonus), ''],
+        ['Previous month balance', formatReportAmount(safeNumber(item.previous_month_balance)), formatReportAmount(safeNumber(item.previous_month_balance)), ''],
+      ];
+
+      if (format === 'excel') {
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'Payroll System';
+        const sheet = workbook.addWorksheet('Salary Statement', {
+          views: [{ state: 'frozen', ySplit: 2 }],
+          pageSetup: { orientation: 'portrait', fitToPage: true, fitToWidth: 1 },
+        });
+        sheet.columns = [
+          { width: 34 }, { width: 30 }, { width: 74 }, { width: 20 },
+        ];
+        sheet.mergeCells('A1:D1');
+        sheet.getCell('A1').value = `Employee Salary Statement — ${monthName.replace('_', ' ')}`;
+        sheet.getCell('A1').font = { bold: true, size: 16, color: { argb: 'FFFFFFFF' } };
+        sheet.getCell('A1').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF17365D' } };
+        sheet.getCell('A1').alignment = { horizontal: 'center', vertical: 'middle' };
+        sheet.getRow(1).height = 30;
+
+        const addSection = (title: string, rows: (string | number)[][]) => {
+          const titleRow = sheet.addRow([title]);
+          sheet.mergeCells(titleRow.number, 1, titleRow.number, 4);
+          titleRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+          titleRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF315A85' } };
+          rows.forEach(row => sheet.addRow(row));
+        };
+        addSection('Employee Details', [
+          ['Employee Name', name, 'Employee ID', employee?.employee_code || employee?.id || item.employee_id],
+          ['Designation', employee?.designation || '—', 'Payroll Month', `${getMonthName(payroll.month)} ${payroll.year}`],
+          ['Calculation days', calculationDays, 'Working days recorded', safeNumber(item.working_days)],
+        ]);
+        addSection('Salary Structure', [
+          ['Component', 'Monthly amount (INR)', 'Payable amount (INR)', 'Notes'],
+          ...salaryRows,
+        ]);
+        addSection('Attendance Summary', [reportColumns, ...attendanceRows]);
+        addSection('Leaves', [
+          ['Date', 'Leave type / status', 'Calculation / details', 'Deduction (INR)'],
+          ...(leaveRows.length ? leaveRows : [['—', 'No leave recorded', 'No leave dates for this period', '—']]),
+        ]);
+        addSection('Missing Timesheets', [
+          reportColumns,
+          ...(timesheetLines.length ? reportRows(timesheetLines) : [[
+            '—',
+            'No timesheet deduction',
+            missingTimesheetDates.length ? `${missingTimesheetDates.length} missing date(s), waived or no deduction recorded` : 'No missing dates recorded',
+            '—',
+          ]]),
+        ]);
+        addSection('Missing Punches', [
+          reportColumns,
+          ...(punchLines.length ? reportRows(punchLines) : [[
+            '—',
+            'No missing-punch deduction',
+            missingPunchDates.length ? `${missingPunchDates.length} missing date(s), excepted or no deduction recorded` : 'No missing punch dates recorded',
+            '—',
+          ]]),
+        ]);
+        addSection('Other Deductions', [
+          reportColumns,
+          ...(otherDeductionLines.length ? reportRows(otherDeductionLines) : [['—', 'No other deductions', 'No other deductions recorded', '—']]),
+        ]);
+        addSection('Payroll Summary', [
+          ['Summary', 'Amount (INR)', '', ''],
+          ['Gross payable before deductions', formatReportAmount(grossPayable), '', ''],
+          ['Total deductions', formatReportAmount(totalDeductions), '', ''],
+          ['Final net payable salary', formatReportAmount(netSalary), '', ''],
+        ]);
+        sheet.eachRow(row => {
+          row.eachCell(cell => {
+            cell.alignment = { vertical: 'middle', wrapText: true, ...(cell.alignment || {}) };
+          });
+        });
+        const buffer = await workbook.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `Salary_Statement_${safeName}_${monthName}.xlsx`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
+      } else {
+        const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+        let y = 16;
+        doc.setFontSize(16);
+        doc.setTextColor(23, 54, 93);
+        doc.text('Employee Salary Statement', 14, y);
+        doc.setFontSize(10);
+        doc.setTextColor(60, 70, 80);
+        doc.text(`${getMonthName(payroll.month)} ${payroll.year}`, 14, y + 7);
+        y += 14;
+        const addPdfSection = (
+          title: string,
+          rows: string[][],
+          headers = ['Date / Component', 'Reason / Details', 'Calculation', 'Amount (INR)']
+        ) => {
+          if (y > doc.internal.pageSize.getHeight() - 50) {
+            doc.addPage();
+            y = 16;
+          }
+          doc.setFontSize(11);
+          doc.setTextColor(23, 54, 93);
+          doc.text(title, 14, y + 4);
+          autoTable(doc, {
+            startY: y + 7,
+            head: [headers],
+            body: rows.length ? rows : [['—', 'No details recorded', '—', '—']],
+            theme: 'striped',
+            headStyles: { fillColor: [49, 90, 133], fontSize: 8 },
+            columnStyles: { 0: { cellWidth: 30 }, 1: { cellWidth: 43 }, 2: { cellWidth: 78 }, 3: { cellWidth: 30, halign: 'right' } },
+            styles: { fontSize: 8, cellPadding: 2, overflow: 'linebreak' },
+            margin: { left: 14, right: 14 },
+          });
+          y = (doc as jsPDF & { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY || y + 15;
+          y += 7;
+        };
+        addPdfSection('Employee Details', [
+          ['Employee name', name, 'Employee ID', employee?.employee_code || employee?.id || item.employee_id],
+          ['Designation', employee?.designation || '—', 'Payroll month', `${getMonthName(payroll.month)} ${payroll.year}`],
+        ]);
+        addPdfSection('Salary Structure', salaryRows, ['Component', 'Monthly amount (INR)', 'Payable amount (INR)', 'Notes']);
+        addPdfSection('Attendance Summary', attendanceRows);
+        addPdfSection('Leaves', leaveRows);
+        addPdfSection('Missing Timesheets', timesheetLines.length ? reportRows(timesheetLines) : [[
+          '—', 'No timesheet deduction', missingTimesheetDates.length ? `${missingTimesheetDates.length} missing date(s), waived or no deduction recorded` : 'No missing dates recorded', '—',
+        ]]);
+        addPdfSection('Missing Punches', punchLines.length ? reportRows(punchLines) : [[
+          '—', 'No missing-punch deduction', missingPunchDates.length ? `${missingPunchDates.length} missing date(s), excepted or no deduction recorded` : 'No missing punch dates recorded', '—',
+        ]]);
+        addPdfSection('Other Deductions', reportRows(otherDeductionLines));
+        addPdfSection('Payroll Summary', [
+          ['Gross payable before deductions', 'Generated payroll amount', 'Gross salary and earnings', formatReportAmount(grossPayable)],
+          ['Total deductions', 'As itemized above', 'Generated payroll deductions', formatReportAmount(totalDeductions)],
+          ['Final net payable salary', 'Amount payable', 'Generated payroll net salary', formatReportAmount(netSalary)],
+        ]);
+        doc.save(`Salary_Statement_${safeName}_${monthName}.pdf`);
+      }
+      setEmployeeReportItem(null);
+    } catch (error) {
+      console.error('Employee salary statement export failed:', error);
+      showToast('error', 'Failed to download employee salary statement');
+    }
+  }
+
   async function openPastAnalysis(payroll: PayrollType) {
     try {
       const response = await fetch(`/api/payroll-items/analysis/${payroll.id}`);
@@ -1309,6 +1672,7 @@ export function Payroll() {
                           <PayrollBreakdown
                             items={payrollItems}
                             loading={loadingItems}
+                            onDownloadEmployee={setEmployeeReportItem}
                             month={payroll.month}
                             year={payroll.year}
                             payrollId={payroll.id}
@@ -1618,6 +1982,39 @@ export function Payroll() {
       )}
 
       <Modal
+        isOpen={!!employeeReportItem}
+        onClose={() => setEmployeeReportItem(null)}
+        title={`Download salary statement${employeeReportItem?.employee?.name ? ` — ${employeeReportItem.employee.name}` : ''}`}
+        size="sm"
+        footer={
+          <div className="flex justify-end gap-3">
+            <Button variant="outline" onClick={() => setEmployeeReportItem(null)}>Cancel</Button>
+          </div>
+        }
+      >
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            type="button"
+            disabled={!selectedPayroll || !employeeReportItem}
+            onClick={() => selectedPayroll && employeeReportItem && downloadEmployeeSalaryReport(selectedPayroll, employeeReportItem, 'pdf')}
+            className="flex flex-col items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-700 p-5 text-slate-700 dark:text-slate-200 hover:border-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 disabled:opacity-50"
+          >
+            <FileText size={22} className="text-red-600" />
+            <span className="text-sm font-medium">Download PDF</span>
+          </button>
+          <button
+            type="button"
+            disabled={!selectedPayroll || !employeeReportItem}
+            onClick={() => selectedPayroll && employeeReportItem && downloadEmployeeSalaryReport(selectedPayroll, employeeReportItem, 'excel')}
+            className="flex flex-col items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-700 p-5 text-slate-700 dark:text-slate-200 hover:border-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 disabled:opacity-50"
+          >
+            <FileSpreadsheet size={22} className="text-emerald-600" />
+            <span className="text-sm font-medium">Download Excel</span>
+          </button>
+        </div>
+      </Modal>
+
+      <Modal
         isOpen={!!editingItem}
         onClose={() => setEditingItem(null)}
         title={`Adjust Payroll: ${editingItem?.employee?.name}`}
@@ -1691,7 +2088,7 @@ export function Payroll() {
   );
 }
 
-function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onStatusChange, locked = false }: { items: PayrollItemWithEmployee[]; loading: boolean; onEdit?: (item: any) => void; month?: number; year?: number; payrollId?: string; onStatusChange?: () => void; locked?: boolean }) {
+function PayrollBreakdown({ items, loading, onEdit, onDownloadEmployee, month, year, payrollId, onStatusChange, locked = false }: { items: PayrollItemWithEmployee[]; loading: boolean; onEdit?: (item: any) => void; onDownloadEmployee?: (item: PayrollItemWithEmployee) => void; month?: number; year?: number; payrollId?: string; onStatusChange?: () => void; locked?: boolean }) {
   const { showToast } = useToast();
   const [showDetails, setShowDetails] = useState(false);
   const [expandedItemId, setExpandedItemId] = useState<string | null>(null);
@@ -2008,6 +2405,16 @@ function PayrollBreakdown({ items, loading, onEdit, month, year, payrollId, onSt
                         <button onClick={() => setSalarySlipModal(item)} className="ml-auto p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded transition-colors" title="View Full Salary Details">
                           <FileText size={14} />
                         </button>
+                        {onDownloadEmployee && (
+                          <button
+                            onClick={() => onDownloadEmployee(item)}
+                            className="p-1 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 rounded transition-colors"
+                            title="Download employee salary statement"
+                            aria-label={`Download salary statement for ${item.employee?.name || 'employee'}`}
+                          >
+                            <Download size={14} />
+                          </button>
+                        )}
                       </div>
                     </td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800">

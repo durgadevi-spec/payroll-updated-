@@ -20,10 +20,13 @@ import {
   Ban,
   Paperclip,
   Download,
-  XCircle
+  XCircle,
+  ChevronDown,
+  ChevronRight
 } from 'lucide-react';
 import { format, addMonths } from 'date-fns';
 import { useAuth } from '../context/AuthContext';
+import { supabase } from '../lib/supabase';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
@@ -129,6 +132,14 @@ export function AdvanceManagement() {
   const [closeReason, setCloseReason] = useState('');
   const [closeSubmitting, setCloseSubmitting] = useState(false);
   const [closeError, setCloseError] = useState('');
+
+  const [expandedAdvanceId, setExpandedAdvanceId] = useState<string | null>(null);
+  const [repaymentsByAdvance, setRepaymentsByAdvance] = useState<Record<string, any[]>>({});
+  const [repaymentsLoading, setRepaymentsLoading] = useState(false);
+  const [repaymentError, setRepaymentError] = useState('');
+  const [repaymentSubmitting, setRepaymentSubmitting] = useState(false);
+  const [editingRepaymentId, setEditingRepaymentId] = useState<string | null>(null);
+  const [repaymentForm, setRepaymentForm] = useState({ month: format(new Date(), 'yyyy-MM'), amount: '' });
 
   useEffect(() => {
     if (detailsAdv && detailsAdv.settlement_type === 'Reconciliation') {
@@ -600,6 +611,149 @@ export function AdvanceManagement() {
     }
   };
 
+  async function fetchRepayments(advanceId: string) {
+    setRepaymentsLoading(true);
+    setRepaymentError('');
+    try {
+      const res = await fetchAdvanceRepaymentApi(`/api/advances/${advanceId}/repayments`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to load repayment history');
+      }
+      const records = await res.json();
+      setRepaymentsByAdvance(current => ({ ...current, [advanceId]: records }));
+    } catch (error) {
+      console.error('Failed to load advance repayments:', error);
+      setRepaymentError(error instanceof Error ? error.message : 'Failed to load repayment history');
+    } finally {
+      setRepaymentsLoading(false);
+    }
+  }
+
+  async function fetchAdvanceRepaymentApi(url: string, init?: RequestInit) {
+    const { data, error } = await supabase.auth.getSession();
+    if (error) throw error;
+    if (!data.session?.access_token) throw new Error('You must be signed in to manage repayments');
+    const headers = new Headers(init?.headers);
+    headers.set('Authorization', `Bearer ${data.session.access_token}`);
+    return fetch(url, { ...init, headers });
+  }
+
+  function toggleRepayments(advanceId: string) {
+    setEditingRepaymentId(null);
+    setRepaymentError('');
+    if (expandedAdvanceId === advanceId) {
+      setExpandedAdvanceId(null);
+      return;
+    }
+    setExpandedAdvanceId(advanceId);
+    setRepaymentForm({ month: format(new Date(), 'yyyy-MM'), amount: '' });
+    fetchRepayments(advanceId);
+  }
+
+  function editRepayment(record: any) {
+    setEditingRepaymentId(record.id);
+    setRepaymentForm({
+      month: String(record.repayment_month).slice(0, 7),
+      amount: String(record.amount)
+    });
+    setRepaymentError('');
+  }
+
+  async function saveRepayment(advanceId: string) {
+    setRepaymentSubmitting(true);
+    setRepaymentError('');
+    try {
+      const editing = Boolean(editingRepaymentId);
+      const res = await fetchAdvanceRepaymentApi(
+        editing
+          ? `/api/advances/${advanceId}/repayments/${editingRepaymentId}`
+          : `/api/advances/${advanceId}/repayments`,
+        {
+          method: editing ? 'PUT' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            repayment_month: repaymentForm.month,
+            amount: repaymentForm.amount
+          })
+        }
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to save repayment');
+      }
+      setEditingRepaymentId(null);
+      setRepaymentForm({ month: format(new Date(), 'yyyy-MM'), amount: '' });
+      await fetchAdvances();
+      await fetchRepayments(advanceId);
+    } catch (error) {
+      console.error('Failed to save advance repayment:', error);
+      setRepaymentError(error instanceof Error ? error.message : 'Failed to save repayment');
+    } finally {
+      setRepaymentSubmitting(false);
+    }
+  }
+
+  function downloadRepaymentPDF(adv: any) {
+    try {
+      const records = repaymentsByAdvance[adv.id] || [];
+      const totalRepaid = records.reduce((sum: number, row: any) => sum + Number(row.amount), 0);
+      const outstanding = Math.max(0, Number(adv.amount) - totalRepaid);
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      doc.setFillColor(15, 23, 42);
+      doc.rect(0, 0, pageWidth, 25, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(15);
+      doc.text('ADVANCE REPAYMENT REPORT', 15, 15);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.text(`Generated ${format(new Date(), 'dd MMM yyyy')}`, 15, 21);
+
+      doc.setTextColor(30, 41, 59);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.text(`Employee: ${adv.employee_name || '—'}`, 15, 38);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.text(`Original advance: Rs. ${Number(adv.amount).toLocaleString()}`, 15, 46);
+      doc.text(`Advance date: ${adv.date ? format(new Date(adv.date), 'dd MMM yyyy') : '—'}`, 15, 53);
+
+      autoTable(doc, {
+        startY: 62,
+        head: [['Deduction Month', 'Deducted Amount', 'Total Repaid', 'Remaining Balance']],
+        body: records.map((row: any) => [
+          row.repayment_month
+            ? format(new Date(`${String(row.repayment_month).slice(0, 10)}T00:00:00`), 'MMMM yyyy')
+            : 'Historical (date unavailable)',
+          `Rs. ${Number(row.amount).toLocaleString()}`,
+          `Rs. ${Number(row.total_repaid).toLocaleString()}`,
+          `Rs. ${Number(row.remaining_balance).toLocaleString()}`
+        ]),
+        theme: 'striped',
+        headStyles: { fillColor: [79, 70, 229], textColor: 255 },
+        styles: { fontSize: 8 },
+        margin: { left: 15, right: 15 }
+      });
+
+      const summaryY = (doc as any).lastAutoTable.finalY + 12;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.text('Final Repayment Summary', 15, summaryY);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.text(`Original advance: Rs. ${Number(adv.amount).toLocaleString()}`, 15, summaryY + 8);
+      doc.text(`Total repaid: Rs. ${totalRepaid.toLocaleString()}`, 15, summaryY + 15);
+      doc.text(`Outstanding balance: Rs. ${outstanding.toLocaleString()}`, 15, summaryY + 22);
+      const filename = `${String(adv.employee_name || 'employee').replace(/[^a-z0-9]+/gi, '_')}_advance_repayment.pdf`;
+      doc.save(filename);
+    } catch (error) {
+      console.error('Failed to generate repayment PDF:', error);
+      setRepaymentError('Failed to generate repayment PDF');
+    }
+  }
+
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
@@ -700,7 +854,8 @@ export function AdvanceManagement() {
               ) : visibleAdvances.length === 0 ? (
                 <tr><td colSpan={7} className="px-6 py-8 text-center text-slate-500">No advances found</td></tr>
               ) : visibleAdvances.map((adv) => (
-                <tr key={adv.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                <React.Fragment key={adv.id}>
+                <tr className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 rounded-full bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300 flex items-center justify-center font-bold text-xs">
@@ -794,12 +949,133 @@ export function AdvanceManagement() {
                           )}
                         </>
                       )}
+                      <button
+                        onClick={() => toggleRepayments(adv.id)}
+                        title={expandedAdvanceId === adv.id ? 'Hide repayment history' : 'Show repayment history'}
+                        aria-expanded={expandedAdvanceId === adv.id}
+                        className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-colors"
+                      >
+                        {expandedAdvanceId === adv.id ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                      </button>
                       <button onClick={() => setDetailsAdv(adv)} title="View details" className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-md transition-colors">
                         <Eye size={16} />
                       </button>
                     </div>
                   </td>
                 </tr>
+                {expandedAdvanceId === adv.id && (
+                  <tr className="bg-slate-50/80 dark:bg-slate-800/40">
+                    <td colSpan={7} className="px-6 py-4">
+                      <div className="space-y-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                          <div>
+                            <h4 className="font-semibold text-slate-800 dark:text-white">Monthly repayment history</h4>
+                            <p className="text-xs text-slate-500">
+                              Repaid: ₹{(repaymentsByAdvance[adv.id] || []).reduce((sum: number, row: any) => sum + Number(row.amount), 0).toLocaleString()}
+                              {' · '}Outstanding: ₹{Number(adv.balance).toLocaleString()}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => downloadRepaymentPDF(adv)}
+                            className="inline-flex items-center gap-1.5 self-start px-3 py-1.5 text-xs font-medium text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20"
+                          >
+                            <Download size={14} /> Download PDF
+                          </button>
+                        </div>
+
+                        {repaymentError && <p className="text-xs text-red-600 dark:text-red-400">{repaymentError}</p>}
+                        {repaymentsLoading ? (
+                          <div className="py-4 text-center text-xs text-slate-500">Loading repayment history...</div>
+                        ) : (repaymentsByAdvance[adv.id] || []).length === 0 ? (
+                          <div className="py-3 text-xs text-slate-500">No repayments have been recorded.</div>
+                        ) : (
+                          <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-x-auto">
+                            <table className="w-full text-xs text-left">
+                              <thead className="bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 uppercase">
+                                <tr>
+                                  <th className="px-3 py-2 font-medium">Deduction month</th>
+                                  <th className="px-3 py-2 text-right font-medium">Deducted</th>
+                                  <th className="px-3 py-2 text-right font-medium">Total repaid</th>
+                                  <th className="px-3 py-2 text-right font-medium">Remaining</th>
+                                  <th className="px-3 py-2 text-right font-medium">Action</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
+                                {(repaymentsByAdvance[adv.id] || []).map((record: any) => (
+                                  <tr key={record.id}>
+                                    <td className="px-3 py-2 text-slate-700 dark:text-slate-300">
+                                      {record.repayment_month
+                                        ? format(new Date(`${String(record.repayment_month).slice(0, 10)}T00:00:00`), 'MMMM yyyy')
+                                        : 'Historical (date unavailable)'}
+                                      {record.notes?.startsWith('Seeded from paid payroll') && <span className="ml-2 text-[10px] text-blue-500">Payroll import</span>}
+                                      {record.is_legacy && <span className="ml-2 text-[10px] text-slate-400">Balance history</span>}
+                                    </td>
+                                    <td className="px-3 py-2 text-right text-slate-700 dark:text-slate-300">₹{Number(record.amount).toLocaleString()}</td>
+                                    <td className="px-3 py-2 text-right text-slate-700 dark:text-slate-300">₹{Number(record.total_repaid).toLocaleString()}</td>
+                                    <td className="px-3 py-2 text-right font-medium text-slate-700 dark:text-slate-300">₹{Number(record.remaining_balance).toLocaleString()}</td>
+                                    <td className="px-3 py-2 text-right">
+                                      {record.repayment_month && (adv.status === 'Active' || (adv.status === 'Closed' && !adv.closed_at && !adv.shortfall_action)) && adv.settlement_type !== 'Reconciliation' && (
+                                        <button onClick={() => editRepayment(record)} title="Edit repayment" className="text-blue-600 dark:text-blue-400 hover:underline">
+                                          <Edit size={13} />
+                                        </button>
+                                      )}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+
+                        {(adv.status === 'Active' || (editingRepaymentId && adv.status === 'Closed' && !adv.closed_at && !adv.shortfall_action)) && adv.settlement_type !== 'Reconciliation' && (
+                          <div className="flex flex-col sm:flex-row items-end gap-2 border-t border-slate-200 dark:border-slate-700 pt-3">
+                            <label className="w-full sm:w-auto text-xs text-slate-600 dark:text-slate-300">
+                              Deduction month
+                              <input
+                                type="month"
+                                value={repaymentForm.month}
+                                onChange={event => setRepaymentForm({ ...repaymentForm, month: event.target.value })}
+                                className="block w-full mt-1 px-2.5 py-1.5 border border-slate-300 dark:border-slate-600 rounded-md bg-white dark:bg-slate-900 text-sm"
+                              />
+                            </label>
+                            <label className="w-full sm:w-auto text-xs text-slate-600 dark:text-slate-300">
+                              Deducted amount (₹)
+                              <input
+                                type="number"
+                                min="0.01"
+                                step="0.01"
+                                max={Number(adv.balance) + (editingRepaymentId
+                                  ? Number((repaymentsByAdvance[adv.id] || []).find((row: any) => row.id === editingRepaymentId)?.amount || 0)
+                                  : 0)}
+                                value={repaymentForm.amount}
+                                onChange={event => setRepaymentForm({ ...repaymentForm, amount: event.target.value })}
+                                className="block w-full mt-1 px-2.5 py-1.5 border border-slate-300 dark:border-slate-600 rounded-md bg-white dark:bg-slate-900 text-sm"
+                              />
+                            </label>
+                            <div className="flex gap-2">
+                              {editingRepaymentId && (
+                                <button
+                                  onClick={() => { setEditingRepaymentId(null); setRepaymentForm({ month: format(new Date(), 'yyyy-MM'), amount: '' }); }}
+                                  className="px-3 py-2 text-xs font-medium text-slate-600 dark:text-slate-300 border border-slate-300 dark:border-slate-600 rounded-md hover:bg-white dark:hover:bg-slate-700"
+                                >
+                                  Cancel
+                                </button>
+                              )}
+                              <button
+                                onClick={() => saveRepayment(adv.id)}
+                                disabled={repaymentSubmitting || !repaymentForm.month || !repaymentForm.amount}
+                                className="px-3 py-2 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md disabled:opacity-50"
+                              >
+                                {repaymentSubmitting ? 'Saving...' : editingRepaymentId ? 'Save changes' : 'Add repayment'}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>

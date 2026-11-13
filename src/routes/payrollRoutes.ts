@@ -1,5 +1,6 @@
-import { Router } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { Pool } from 'pg';
+import { createClient } from '@supabase/supabase-js';
 import * as dotenv from 'dotenv';
 import ZKLib from 'node-zklib';
 import { sendEmail } from './emailRoutes';
@@ -85,6 +86,54 @@ async function safeConnectOptionalPool(pool: PgPool | null) {
 export const payrollPool = createPool(payrollUrl);
 const lmsPool = lmsUrl ? createPool(lmsUrl) : null;
 const timesheetPool = timesheetUrl ? createPool(timesheetUrl) : null;
+const authSupabaseUrl = process.env.VITE_SUPABASE_URL;
+const authSupabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY;
+const authSupabase = authSupabaseUrl && authSupabaseAnonKey
+  ? createClient(authSupabaseUrl, authSupabaseAnonKey)
+  : null;
+
+async function requireAdvanceAdminAuth(req: Request, res: Response, next: NextFunction) {
+  if (!authSupabase) {
+    return res.status(500).json({ error: 'Supabase is not configured on the backend.' });
+  }
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing or invalid Authorization header' });
+  }
+
+  let user: { id: string; email?: string } | null = null;
+  let authError: unknown = null;
+  try {
+    const result = await authSupabase.auth.getUser(authHeader.slice(7));
+    user = result.data.user;
+    authError = result.error;
+  } catch (verificationError) {
+    console.error('Error verifying advance repayment user:', verificationError);
+    return res.status(500).json({ error: 'Failed to verify advance repayment user' });
+  }
+  if (authError || !user?.email) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+
+  let client;
+  try {
+    client = await payrollPool.connect();
+    const employeeResult = await client.query(
+      'SELECT role FROM employees WHERE auth_user_id = $1 OR LOWER(email) = LOWER($2) ORDER BY (auth_user_id = $1) DESC LIMIT 1',
+      [user.id, user.email]
+    );
+    if (employeeResult.rows.length > 0 && String(employeeResult.rows[0].role || 'employee').trim().toLowerCase() !== 'admin') {
+      return res.status(403).json({ error: 'Admin access is required to manage advance repayments' });
+    }
+    res.locals.advanceUserEmail = user.email;
+    next();
+  } catch (authError) {
+    console.error('Error authorizing advance repayment request:', authError);
+    res.status(500).json({ error: 'Failed to authorize advance repayment request' });
+  } finally {
+    if (client) client.release();
+  }
+}
 
 // ─── Timesheet Approval Requirement ───────────────────────────────────────────
 // Admin setting (Settings → Payroll Rules → "Timesheet approval required", stored in the
@@ -2617,7 +2666,7 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
     const ANALYSIS_CONCURRENCY = 5;
     const enriched = await mapWithConcurrency(itemsResult.rows as (PayrollItemAnalysisRow & { monthly_salary: number })[], ANALYSIS_CONCURRENCY, async (item) => {
       const monthlySalary = item.monthly_salary || 0;
-      let leaveData: { unpaid_leaves?: number; leave_type?: string; leave_dates?: string[]; od_dates?: string[]; permission_hours?: number } | null = null;
+      let leaveData: { unpaid_leaves?: number; leave_type?: string; leave_dates?: string[]; od_dates?: string[]; permission_hours?: number; paid_by_balance_dates?: string[]; unpaid_leave_details?: { date: string; days: number }[]; leave_details?: { date: string; type: string; days: number; status: string }[] } | null = null;
       let tsData: { missing_days?: number; submitted_at?: string | null; missing_dates?: string[]; unapproved_dates?: string[]; excluded_dates?: string[] } | null = null;
 
       // If this employee's joining date falls within the payroll month, don't
@@ -2677,6 +2726,8 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
             const odDates: string[] = [];
             const halfDayLeaveDates: string[] = [];
             const paidByBalanceDates: string[] = [];
+            const unpaidLeaveDetails: { date: string; days: number }[] = [];
+            const leaveDetails: { date: string; type: string; days: number; status: string }[] = [];
             let unpaidCount = 0;
             let totalCount = 0;
             let paSlaConsumed = 0;
@@ -2693,22 +2744,26 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
               const d = toLocalDateStr(row.leave_date);
               const dayValue = row.leave_duration_type === 'Half Day' ? 0.5 : 1.0;
               allLeaveDates.push(d);
+              const normalizedType = (row.leave_type || '').trim().toLowerCase();
               // A company/government holiday is paid for EVERYONE (probation included). A leave
               // record that happens to cover a holiday date must not be counted as leave, must not
               // become "unpaid" for someone with no PL/SL balance, and must not eat PL/SL balance.
               // (The date stays in allLeaveDates so the other date-based checks behave as before.)
-              if (holidaySet.has(d)) continue;
+              if (holidaySet.has(d)) {
+                leaveDetails.push({ date: d, type: row.leave_type || 'Leave', days: dayValue, status: 'Holiday - no deduction' });
+                continue;
+              }
               leaveTypeSummary.push(row.leave_type);
               if (row.leave_duration_type === 'Half Day') {
                 halfDayLeaveDates.push(d);
               }
-              const normalizedType = (row.leave_type || '').trim().toLowerCase();
 
               if (row.leave_type === 'OD') {
                 // OD (On Duty) is not leave — it's shown as its own separate line in the UI,
                 // so it must NOT be added to totalCount or the "Leave Taken" figure will
                 // double-count it (once in the total, once again in the "+Xd OD" line).
                 odDates.push(d);
+                leaveDetails.push({ date: d, type: row.leave_type, days: dayValue, status: 'On duty - no deduction' });
               } else if (normalizedType === 'comp off') {
                 totalCount += dayValue;
                 const coveredDays = parseFloat(row.comp_off_covered_days || '0');
@@ -2716,9 +2771,17 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
                   const uncoveredDates = row.comp_off_uncovered_dates.split(',').map((s: string) => s.trim());
                   if (uncoveredDates.includes(d)) {
                     unpaidCount += dayValue;
+                    unpaidLeaveDetails.push({ date: d, days: dayValue });
+                    leaveDetails.push({ date: d, type: row.leave_type || 'Comp Off', days: dayValue, status: 'Unpaid leave' });
+                  } else {
+                    leaveDetails.push({ date: d, type: row.leave_type || 'Comp Off', days: dayValue, status: 'Covered comp off - no deduction' });
                   }
                 } else if (coveredDays === 0) {
                   unpaidCount += dayValue;
+                  unpaidLeaveDetails.push({ date: d, days: dayValue });
+                  leaveDetails.push({ date: d, type: row.leave_type || 'Comp Off', days: dayValue, status: 'Unpaid leave' });
+                } else {
+                  leaveDetails.push({ date: d, type: row.leave_type || 'Comp Off', days: dayValue, status: 'Covered comp off - no deduction' });
                 }
               } else {
                 totalCount += dayValue;
@@ -2727,10 +2790,13 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
                   paSlaBalance -= dayValue;
                   paSlaConsumed += dayValue;
                   paidByBalanceDates.push(d);
+                  leaveDetails.push({ date: d, type: row.leave_type || 'Leave', days: dayValue, status: 'Paid by PA/SLA - no deduction' });
                 } else {
                   // Checkbox unticked, or balance exhausted — genuinely unpaid leave,
                   // regardless of whether it's marked PL/SL in the LMS.
                   unpaidCount += dayValue;
+                  unpaidLeaveDetails.push({ date: d, days: dayValue });
+                  leaveDetails.push({ date: d, type: row.leave_type || 'Leave', days: dayValue, status: 'Unpaid leave' });
                 }
               }
             }
@@ -2766,6 +2832,8 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
               comp_off_uncovered_dates: uncoveredCompOffDates,
               pa_sla_consumed: paSlaConsumed,
               paid_by_balance_dates: paidByBalanceDates,
+              unpaid_leave_details: unpaidLeaveDetails,
+              leave_details: leaveDetails,
             } as any;
           }
 
@@ -3210,6 +3278,10 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
         timesheet_excluded_dates: finalExcludedDates,
         holiday_dates: finalHolidayDates,
         leave_dates: leaveDatesArray,
+        paid_by_balance_dates: (leaveData as any)?.paid_by_balance_dates ?? [],
+        unpaid_leave_details: (leaveData as any)?.unpaid_leave_details ?? [],
+        leave_details: (leaveData as any)?.leave_details ?? [],
+        attendance_dates: Array.from(fullyPunchedDatesSet),
       };
     });
 
@@ -3917,22 +3989,238 @@ router.get('/advances', async (_req, res) => {
     client = await payrollPool.connect();
     const result = await client.query(`
       SELECT a.id, a.employee_id, a.amount, a.date, a.reason, a.repayment_type, a.installment_amount,
-             a.balance, a.remarks, a.status, a.request_source, a.advance_type, a.no_of_installments,
+             a.remarks, a.status, a.request_source, a.advance_type, a.no_of_installments,
              a.approved_by, a.approved_at, a.disbursed_at, a.rejected_by, a.rejected_at, a.rejection_reason,
              a.expense_category, a.settlement_type, a.reconciled_amount, a.shortfall_action,
              a.shortfall_reference, a.shortfall_notes, a.carried_forward_to, a.closed_at, a.closed_by,
              a.payment_mode, a.payment_reference, a.attachment_filename,
              (a.attachment_data IS NOT NULL) AS has_attachment,
              a.created_at, a.updated_at,
+             CASE
+               WHEN COALESCE(a.settlement_type, 'Payroll') = 'Reconciliation' OR a.shortfall_action IS NOT NULL THEN a.balance
+               ELSE GREATEST(0, a.amount - COALESCE(repayments.total_repaid, 0))
+             END AS balance,
              e.name as employee_name, e.department
       FROM advances a
       JOIN employees e ON a.employee_id = e.id
+      LEFT JOIN (
+        SELECT advance_id, SUM(amount) AS total_repaid
+        FROM advance_repayments
+        GROUP BY advance_id
+      ) repayments ON repayments.advance_id = a.id
       ORDER BY a.created_at DESC
     `);
     res.json(result.rows);
   } catch (err) {
     console.error('Error fetching advances:', err);
     res.status(500).json({ error: 'Failed to fetch advances' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+router.get('/advances/:id/repayments', requireAdvanceAdminAuth, async (req, res) => {
+  let client;
+  try {
+    client = await payrollPool.connect();
+    const result = await client.query(`
+      SELECT r.id, r.advance_id, r.repayment_month, r.amount, r.is_legacy, r.notes,
+             r.created_by, r.created_at, r.updated_at,
+             SUM(r.amount) OVER (
+               PARTITION BY r.advance_id
+               ORDER BY r.repayment_month, r.created_at, r.id
+               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+             ) AS total_repaid,
+             GREATEST(0, a.amount - SUM(r.amount) OVER (
+               PARTITION BY r.advance_id
+               ORDER BY r.repayment_month, r.created_at, r.id
+               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+             )) AS remaining_balance
+      FROM advance_repayments r
+      JOIN advances a ON a.id = r.advance_id
+      WHERE r.advance_id = $1
+      ORDER BY r.repayment_month, r.created_at, r.id
+    `, [req.params.id]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error fetching advance repayments:', err);
+    res.status(500).json({ error: 'Failed to fetch advance repayments' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+async function updateAdvanceBalanceFromRepayments(client: any, advance: any) {
+  const repaidResult = await client.query(
+    'SELECT COALESCE(SUM(amount), 0) AS total_repaid FROM advance_repayments WHERE advance_id = $1',
+    [advance.id]
+  );
+  const totalRepaid = Number(repaidResult.rows[0].total_repaid) || 0;
+  const balance = Math.max(0, Math.round((Number(advance.amount) - totalRepaid) * 100) / 100);
+  const status = balance === 0
+    ? 'Closed'
+    : advance.status === 'Closed' && !advance.closed_at && !advance.shortfall_action
+      ? 'Active'
+      : advance.status;
+  await client.query(
+    'UPDATE advances SET balance = $1, status = $2, updated_at = NOW() WHERE id = $3',
+    [balance, status, advance.id]
+  );
+  return { balance, totalRepaid, status };
+}
+
+function isValidRepaymentMonth(month: unknown): month is string {
+  return typeof month === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(month);
+}
+
+function parseRepaymentAmount(amount: unknown) {
+  const parsed = Number(amount);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.round(parsed * 100) / 100;
+}
+
+router.post('/advances/:id/repayments', requireAdvanceAdminAuth, async (req, res) => {
+  const { repayment_month, amount } = req.body;
+  const parsedAmount = parseRepaymentAmount(amount);
+  if (!isValidRepaymentMonth(repayment_month) || parsedAmount === null) {
+    return res.status(400).json({ error: 'A valid repayment month and positive amount are required' });
+  }
+
+  let client;
+  try {
+    client = await payrollPool.connect();
+    await client.query('BEGIN');
+    const advanceResult = await client.query(
+      'SELECT id, amount, balance, status, settlement_type, closed_at, shortfall_action FROM advances WHERE id = $1 FOR UPDATE',
+      [req.params.id]
+    );
+    if (advanceResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Advance not found' });
+    }
+    const advance = advanceResult.rows[0];
+    if (advance.status !== 'Active' || advance.settlement_type === 'Reconciliation') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Repayments can only be added to active payroll advances' });
+    }
+
+    const existing = await client.query(
+      'SELECT id FROM advance_repayments WHERE advance_id = $1 AND repayment_month = $2',
+      [advance.id, `${repayment_month}-01`]
+    );
+    if (existing.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'A repayment is already recorded for this month; edit that entry instead' });
+    }
+
+    const totals = await client.query(
+      'SELECT COALESCE(SUM(amount), 0) AS total_repaid FROM advance_repayments WHERE advance_id = $1',
+      [advance.id]
+    );
+    const remaining = Math.max(0, Number(advance.amount) - Number(totals.rows[0].total_repaid));
+    if (parsedAmount > remaining) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: `Repayment cannot exceed the remaining balance of ₹${remaining.toLocaleString()}` });
+    }
+
+    const inserted = await client.query(`
+      INSERT INTO advance_repayments (advance_id, repayment_month, amount, created_by)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id, advance_id, repayment_month, amount, is_legacy, notes, created_by, created_at, updated_at
+    `, [advance.id, `${repayment_month}-01`, parsedAmount, res.locals.advanceUserEmail]);
+    const updated = await updateAdvanceBalanceFromRepayments(client, advance);
+    await client.query(
+      `INSERT INTO audit_logs (action, entity, entity_id, details, user_email)
+       VALUES ($1, $2, $3, $4, $5)`,
+      ['ADVANCE_REPAYMENT_ADDED', 'advances', advance.id, JSON.stringify(inserted.rows[0]), res.locals.advanceUserEmail]
+    );
+    await client.query('COMMIT');
+    res.status(201).json({ ...inserted.rows[0], ...updated });
+  } catch (err) {
+    if (client) await client.query('ROLLBACK').catch(() => undefined);
+    console.error('Error adding advance repayment:', err);
+    res.status(500).json({ error: 'Failed to add advance repayment' });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+router.put('/advances/:id/repayments/:repaymentId', requireAdvanceAdminAuth, async (req, res) => {
+  const { repayment_month, amount } = req.body;
+  const parsedAmount = parseRepaymentAmount(amount);
+  if (!isValidRepaymentMonth(repayment_month) || parsedAmount === null) {
+    return res.status(400).json({ error: 'A valid repayment month and positive amount are required' });
+  }
+
+  let client;
+  try {
+    client = await payrollPool.connect();
+    await client.query('BEGIN');
+    const advanceResult = await client.query(
+      'SELECT id, amount, balance, status, settlement_type, closed_at, shortfall_action FROM advances WHERE id = $1 FOR UPDATE',
+      [req.params.id]
+    );
+    if (advanceResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Advance not found' });
+    }
+    const advance = advanceResult.rows[0];
+    if (advance.settlement_type === 'Reconciliation' || advance.closed_at || advance.shortfall_action) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'This advance cannot be edited' });
+    }
+
+    const currentResult = await client.query(
+      'SELECT * FROM advance_repayments WHERE id = $1 AND advance_id = $2 FOR UPDATE',
+      [req.params.repaymentId, advance.id]
+    );
+    if (currentResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Repayment not found' });
+    }
+    const duplicate = await client.query(
+      'SELECT id FROM advance_repayments WHERE advance_id = $1 AND repayment_month = $2 AND id <> $3',
+      [advance.id, `${repayment_month}-01`, req.params.repaymentId]
+    );
+    if (duplicate.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'A repayment is already recorded for this month' });
+    }
+
+    const totals = await client.query(
+      'SELECT COALESCE(SUM(amount), 0) AS total_repaid FROM advance_repayments WHERE advance_id = $1 AND id <> $2',
+      [advance.id, req.params.repaymentId]
+    );
+    const remaining = Math.max(0, Number(advance.amount) - Number(totals.rows[0].total_repaid));
+    if (parsedAmount > remaining) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: `Repayment cannot exceed the remaining balance of ₹${remaining.toLocaleString()}` });
+    }
+
+    const updatedEntry = await client.query(`
+      UPDATE advance_repayments
+      SET repayment_month = $1, amount = $2, updated_at = NOW()
+      WHERE id = $3 AND advance_id = $4
+      RETURNING id, advance_id, repayment_month, amount, is_legacy, notes, created_by, created_at, updated_at
+    `, [`${repayment_month}-01`, parsedAmount, req.params.repaymentId, advance.id]);
+    const updated = await updateAdvanceBalanceFromRepayments(client, advance);
+    await client.query(
+      `INSERT INTO audit_logs (action, entity, entity_id, details, user_email)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        'ADVANCE_REPAYMENT_EDITED',
+        'advances',
+        advance.id,
+        JSON.stringify({ before: currentResult.rows[0], after: updatedEntry.rows[0] }),
+        res.locals.advanceUserEmail
+      ]
+    );
+    await client.query('COMMIT');
+    res.json({ ...updatedEntry.rows[0], ...updated });
+  } catch (err) {
+    if (client) await client.query('ROLLBACK').catch(() => undefined);
+    console.error('Error updating advance repayment:', err);
+    res.status(500).json({ error: 'Failed to update advance repayment' });
   } finally {
     if (client) client.release();
   }
@@ -4270,6 +4558,13 @@ router.put('/advances/:id', async (req, res) => {
     const current = currentRes.rows[0];
     const recovered = Number(current.amount) - Number(current.balance);
     const newAmount = parseFloat(amount.toString()) || 0;
+    const repaymentResult = await client.query(
+      'SELECT COALESCE(SUM(amount), 0) AS total_repaid FROM advance_repayments WHERE advance_id = $1',
+      [id]
+    );
+    if (newAmount < Number(repaymentResult.rows[0].total_repaid)) {
+      return res.status(400).json({ error: 'Advance amount cannot be lower than the amount already repaid' });
+    }
     const newBalance = Math.max(0, newAmount - recovered);
 
     // Only overwrite the stored attachment if a new one was actually uploaded,
