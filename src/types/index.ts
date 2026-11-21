@@ -88,6 +88,16 @@ export interface PayrollItem {
   permission_deduction?: number;
   hourly_short_hours?: number;
   hourly_deduction?: number;
+  hourly_deduction_breakdown?: {
+    totalHours: number;
+    fullDayBlocks: number;
+    halfDayBlocks: number;
+    remainingHours: number;
+    fullDayDeduction: number;
+    halfDayDeduction: number;
+    remainingHoursDeduction: number;
+    totalDeduction: number;
+  } | null;
   created_at: string;
   employee?: Employee;
 }
@@ -125,6 +135,9 @@ export interface PayslipFull {
     advance_deduction?: number;
     missing_punches?: number;
     missing_punch_exception_dates?: string[];
+    hourly_short_hours?: number;
+    hourly_deduction?: number;
+    hourly_deduction_breakdown?: PayrollItem['hourly_deduction_breakdown'];
     sunday_work_days?: number;
     previous_month_balance?: number;
     calculation_type?: PayrollItem['calculation_type'];

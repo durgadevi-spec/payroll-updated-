@@ -8,7 +8,7 @@ import { Payroll as PayrollType, PayrollItem, Employee } from '../types/index';
 import { supabase } from '../lib/supabase';
 import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
-import { calculatePayroll, formatCurrency, getCurrentMonth, getMonthName } from '../lib/payrollCalculator';
+import { calculateHourlyExcessDeduction, calculatePayroll, formatCurrency, getCurrentMonth, getMonthName } from '../lib/payrollCalculator';
 import { getSalaryBreakdown } from '../lib/salaryBreakdown';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -27,6 +27,8 @@ interface PayrollItemWithEmployee extends PayrollItem {
   unpaid_leave_details?: { date: string; days: number }[];
   leave_details?: { date: string; type: string; days: number; status: string }[];
   missing_dates?: string[];
+  timesheet_duplicate_dates?: string[];
+  timesheet_deductible_days?: number;
   attendance_dates?: string[];
   incomplete_punch_dates?: string[];
   incomplete_punch_times?: Record<string, string>;
@@ -177,6 +179,7 @@ const getTimesheetExceptionDaysApplied = (item: PayrollItemWithEmployee) => {
 };
 
 const getTimesheetPayableMissingDays = (item: PayrollItemWithEmployee) => {
+  if (typeof item.timesheet_deductible_days === 'number') return item.timesheet_deductible_days;
   const missingDays = safeNumber(item.missing_timesheets, 0);
   return Math.max(0, missingDays - getTimesheetExceptionDaysApplied(item));
 };
@@ -659,7 +662,11 @@ export function Payroll() {
 
         // Daily biometric hours short of 9h/day, net of approved LMS permission / monthly 3h allowance.
         // Deducted proportionally by the hour (not as a full missing day).
-        const hourlyDeductionAmount = emp.summary.hourlyDeductionAmount || 0;
+        const hourlyDeductionBreakdown = calculateHourlyExcessDeduction(
+          emp.summary.deductibleShortfallHours || 0,
+          monthlySalary / calendarDays
+        );
+        const hourlyDeductionAmount = hourlyDeductionBreakdown.totalDeduction;
 
         const calc = calculatePayroll({
           monthlySalary,
@@ -722,6 +729,7 @@ export function Payroll() {
           permission_deduction: calc.permissionDeduction,
           hourly_short_hours: emp.summary.deductibleShortfallHours || 0,
           hourly_deduction: calc.hourlyDeductionAmount,
+          hourly_deduction_breakdown: hourlyDeductionBreakdown,
         });
       }
 
@@ -1187,10 +1195,26 @@ export function Payroll() {
 
     const timesheetDeduction = getTimesheetDeduction(item);
     const missingTimesheetDates = item.missing_dates || [];
+    const duplicateTimesheetDates = item.timesheet_duplicate_dates || [];
     const payableTimesheetDays = getTimesheetPayableMissingDays(item);
     const timesheetExceptionDays = getTimesheetExceptionDaysApplied(item);
     if (timesheetDeduction > 0) {
-      if (timesheetExceptionDays === 0 && missingTimesheetDates.length === payableTimesheetDays && missingTimesheetDates.length > 0) {
+      if (duplicateTimesheetDates.length > 0) {
+        const duplicateDateSet = new Set(duplicateTimesheetDates);
+        const payableTimesheetDates = timesheetExceptionDays === 0
+          ? missingTimesheetDates.filter(date => !duplicateDateSet.has(date))
+          : missingTimesheetDates;
+        const dateLabel = payableTimesheetDates.length > 0
+          ? `Timesheet dates (${payableTimesheetDates.map(formatReportDate).join(', ')})`
+          : 'Payroll period';
+        const overlapNote = `Same-date overlaps (${duplicateTimesheetDates.map(formatReportDate).join(', ')}) are charged once under Missing punch, not again under timesheets.`;
+        addLine(
+          dateLabel,
+          'Timesheet not submitted',
+          `${payableTimesheetDays} payable missing day(s); ${overlapNote}${timesheetExceptionDays > 0 ? ` ${timesheetExceptionDays} timesheet day(s) also excepted; specific waived dates are not retained.` : ''}`,
+          timesheetDeduction
+        );
+      } else if (timesheetExceptionDays === 0 && missingTimesheetDates.length === payableTimesheetDays && missingTimesheetDates.length > 0) {
         addAllocatedLines(
           missingTimesheetDates.map(date => ({ date })),
           'Timesheet not submitted',
@@ -1237,7 +1261,13 @@ export function Payroll() {
     const period = `${getMonthName(payroll.month)} ${payroll.year}`;
     const fixedDeductions: { reason: string; amount: number; calculation: string }[] = [
       { reason: 'Approved permission / permission shortfall', amount: safeNumber(item.permission_deduction), calculation: `${safeNumber(item.permission_hours)} permission hour(s); generated deduction` },
-      { reason: 'Late attendance / insufficient daily hours', amount: safeNumber(item.hourly_deduction), calculation: `${safeNumber(item.hourly_short_hours)} deductible hour(s); daily date-level allocation is not retained in the payroll record` },
+      {
+        reason: 'Late attendance / insufficient daily hours',
+        amount: safeNumber(item.hourly_deduction),
+        calculation: item.hourly_deduction_breakdown
+          ? `${item.hourly_deduction_breakdown.totalHours}h = ${item.hourly_deduction_breakdown.fullDayBlocks} full-day block(s) (${formatCurrency(item.hourly_deduction_breakdown.fullDayDeduction)}) + ${item.hourly_deduction_breakdown.halfDayBlocks} half-day block(s) (${formatCurrency(item.hourly_deduction_breakdown.halfDayDeduction)}) + ${item.hourly_deduction_breakdown.remainingHours}h hourly (${formatCurrency(item.hourly_deduction_breakdown.remainingHoursDeduction)})`
+          : `${safeNumber(item.hourly_short_hours)} deductible hour(s); daily date-level allocation is not retained in the payroll record`,
+      },
       { reason: 'Salary advance repayment', amount: safeNumber(item.advance_deduction), calculation: 'Amount recorded on the generated payroll item' },
       { reason: 'Provident Fund', amount: safeNumber(item.pf_deduction), calculation: 'Amount recorded on the generated payroll item' },
       { reason: 'Employee State Insurance', amount: safeNumber(item.esi_deduction), calculation: 'Amount recorded on the generated payroll item' },
@@ -1937,6 +1967,7 @@ export function Payroll() {
         month={genMonth}
         year={genYear}
         employeeIds={selectedEmployeeId ? [selectedEmployeeId] : employees.map(e => e.id)}
+        fullPage
       />
 
       <Modal
@@ -1978,6 +2009,7 @@ export function Payroll() {
           year={pastAnalysisPayroll.year}
           employeeIds={pastAnalysisEmpIds}
           viewOnly={true}
+          fullPage
         />
       )}
 
@@ -2149,6 +2181,8 @@ function PayrollBreakdown({ items, loading, onEdit, onDownloadEmployee, month, y
           // Pass the missing-days count currently shown on screen — the stored
           // DB value only updates on "Refresh External Data" and can be stale.
           missing_timesheets: missingDays,
+          missing_dates: exceptionModalItem.missing_dates || [],
+          missing_punch_dates: exceptionModalItem.missing_punch_dates || [],
         }),
       });
       if (!response.ok) {
@@ -2175,6 +2209,8 @@ function PayrollBreakdown({ items, loading, onEdit, onDownloadEmployee, month, y
           exception_days: 0,
           note: '',
           missing_timesheets: safeNumber(item.missing_timesheets, 0),
+          missing_dates: item.missing_dates || [],
+          missing_punch_dates: item.missing_punch_dates || [],
         }),
       });
       if (!response.ok) throw new Error('Failed to remove exception');
@@ -2228,6 +2264,8 @@ function PayrollBreakdown({ items, loading, onEdit, onDownloadEmployee, month, y
           // Pass the missing-punch dates currently shown on screen — the stored
           // DB value only updates on "Refresh External Data" and can be stale.
           missing_punch_dates: allDates,
+          missing_dates: missingPunchExceptionModalItem.missing_dates || [],
+          missing_timesheets: safeNumber(missingPunchExceptionModalItem.missing_timesheets, 0),
         }),
       });
       if (!response.ok) {
@@ -2252,7 +2290,9 @@ function PayrollBreakdown({ items, loading, onEdit, onDownloadEmployee, month, y
         body: JSON.stringify({
           excepted_dates: [],
           note: '',
-          missing_punch_dates: (item as any).missing_punch_dates || [],
+          missing_punch_dates: item.missing_punch_dates || [],
+          missing_dates: item.missing_dates || [],
+          missing_timesheets: safeNumber(item.missing_timesheets, 0),
         }),
       });
       if (!response.ok) throw new Error('Failed to remove exception');
@@ -2383,6 +2423,10 @@ function PayrollBreakdown({ items, loading, onEdit, onDownloadEmployee, month, y
               const odDates: string[] = (item as any).od_dates || [];
               const uncoveredCompOffDates: string[] = (item as any).uncovered_comp_off_dates || [];
               const finalMissingDates: string[] = (item as any).missing_dates || [];
+              const halfDayAttendanceDetails: { date: string; hours: number; deduction_days: number }[] =
+                (item as any).half_day_attendance_details || [];
+              const halfDayAttendanceDetailsAvailable =
+                (item as any).half_day_attendance_details_available === true;
               const isOD = (item as any).leave_type === 'OD' || (odDates.length > 0 && item.unpaid_leaves === 0 && uncoveredCompOffDates.length === 0);
               const isExpanded = expandedItemId === item.id;
               const autoExcludedSundays = getAutoExcludedSundays(item, month, year, holidayDates);
@@ -2643,6 +2687,30 @@ function PayrollBreakdown({ items, loading, onEdit, onDownloadEmployee, month, y
                               : <div className="text-slate-400 italic">None</div>
                             }
                           </div>
+                          <div className="bg-amber-50 dark:bg-amber-900/20 p-2 rounded border border-amber-200 dark:border-amber-800">
+                            <p className="font-semibold text-amber-700 dark:text-amber-300 mb-1">
+                              Half-day attendance ({halfDayAttendanceDetailsAvailable ? halfDayAttendanceDetails.length : '—'} dates)
+                            </p>
+                            <p className="text-[9px] text-slate-500 dark:text-slate-400 mb-1">
+                              Each listed day is a flat 0.5-day deduction included in Leave Ded., not Hourly Ded.
+                            </p>
+                            {halfDayAttendanceDetails.map(detail => (
+                              <div key={detail.date} className="text-amber-800 dark:text-amber-200">
+                                {fmt(detail.date)} — {detail.hours.toFixed(1)}h worked; {detail.deduction_days} day deducted
+                              </div>
+                            ))}
+                            {halfDayAttendanceDetailsAvailable && halfDayAttendanceDetails.length === 0 && (
+                              <div className="text-slate-400 italic">None</div>
+                            )}
+                            {!halfDayAttendanceDetailsAvailable && (
+                              <div className="text-slate-400 italic">Details unavailable</div>
+                            )}
+                            {halfDayAttendanceDetails.length > 0 && (
+                              <div className="mt-1 font-medium text-amber-700 dark:text-amber-300">
+                                Total: {halfDayAttendanceDetails.reduce((sum, detail) => sum + detail.deduction_days, 0)} days
+                              </div>
+                            )}
+                          </div>
                           <div className="bg-white dark:bg-slate-800 p-2 rounded border border-slate-200 dark:border-slate-700">
                             <p className="font-semibold text-amber-600 dark:text-amber-400 mb-1">🚫 Excluded TS ({excluded.length} dates)</p>
                             <p className="text-[9px] text-slate-400 mb-1">Leave = Missing TS → no TS deduction</p>
@@ -2859,8 +2927,13 @@ function PayrollBreakdown({ items, loading, onEdit, onDownloadEmployee, month, y
               <div>Permission hours: <span className="font-semibold text-slate-900 dark:text-white">{salarySlipModal.permission_hours || 0}h</span></div>
               <div>Permission Ded.: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency((salarySlipModal as any).permission_deduction || 0)}</span></div>
 
-              <div>Hourly short (biometric &lt;9h/day): <span className="font-semibold text-slate-900 dark:text-white">{(salarySlipModal as any).hourly_short_hours || 0}h</span></div>
+              <div>Cumulative deductible excess: <span className="font-semibold text-slate-900 dark:text-white">{(salarySlipModal as any).hourly_short_hours || 0}h</span></div>
               <div>Hourly Ded.: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency((salarySlipModal as any).hourly_deduction || 0)}</span></div>
+              {salarySlipModal.hourly_deduction_breakdown && (
+                <div className="col-span-2 text-xs text-slate-600 dark:text-slate-400">
+                  Breakdown: {salarySlipModal.hourly_deduction_breakdown.totalHours}h = {salarySlipModal.hourly_deduction_breakdown.fullDayBlocks} full-day block(s) (₹{formatCurrency(salarySlipModal.hourly_deduction_breakdown.fullDayDeduction)}) + {salarySlipModal.hourly_deduction_breakdown.halfDayBlocks} half-day block(s) (₹{formatCurrency(salarySlipModal.hourly_deduction_breakdown.halfDayDeduction)}) + {salarySlipModal.hourly_deduction_breakdown.remainingHours}h hourly (₹{formatCurrency(salarySlipModal.hourly_deduction_breakdown.remainingHoursDeduction)})
+                </div>
+              )}
 
               <div>Advance Deduction: <span className="font-semibold text-red-600 dark:text-red-400">₹{formatCurrency(salarySlipModal.advance_deduction || 0)}</span></div>
               <div />

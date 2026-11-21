@@ -33,7 +33,7 @@ BEGIN
         SELECT 1
         FROM public.advance_repayments payroll_repayment
         WHERE payroll_repayment.advance_id = legacy.advance_id
-          AND payroll_repayment.notes = 'Seeded from paid payroll deduction; assigned to oldest advance only'
+          AND payroll_repayment.notes LIKE 'Seeded from paid payroll deduction; assigned to oldest advance only%'
       );
 
     IF to_regclass('public.payroll_items') IS NOT NULL
@@ -41,7 +41,7 @@ BEGIN
       AND NOT EXISTS (
         SELECT 1
         FROM public.advance_repayments
-        WHERE notes = 'Seeded from paid payroll deduction; assigned to oldest advance only'
+        WHERE notes LIKE 'Seeded from paid payroll deduction; assigned to oldest advance only%'
       )
     THEN
       CREATE TEMP TABLE advance_repayment_backfill_state (
@@ -73,7 +73,10 @@ BEGIN
         FROM (
           SELECT
             pi.employee_id,
-            make_date(p.year, p.month, 1) AS deduction_month,
+            date_trunc('month', COALESCE(
+              p.paid_at::date,
+              (make_date(p.year, p.month, 1) + INTERVAL '1 month - 1 day')::date
+            ))::date AS deduction_month,
             COALESCE(p.paid_at::date, (make_date(p.year, p.month, 1) + INTERVAL '1 month - 1 day')::date) AS paid_on,
             pi.advance_deduction,
             ROW_NUMBER() OVER (
@@ -122,7 +125,7 @@ BEGIN
             target_advance.advance_id,
             payroll_row.deduction_month,
             amount_to_record,
-            'Seeded from paid payroll deduction; assigned to oldest advance only'
+            'Seeded from paid payroll deduction; assigned to oldest advance only; month reflects payment date'
           )
           ON CONFLICT (advance_id, repayment_month) DO NOTHING;
 
@@ -153,7 +156,7 @@ BEGIN
         SELECT 1
         FROM public.advance_repayments payroll_repayment
         WHERE payroll_repayment.advance_id = a.id
-          AND payroll_repayment.notes = 'Seeded from paid payroll deduction; assigned to oldest advance only'
+          AND payroll_repayment.notes LIKE 'Seeded from paid payroll deduction; assigned to oldest advance only%'
       )
     GROUP BY a.id
     HAVING GREATEST(0, a.amount - COALESCE(a.balance, 0)) > COALESCE(SUM(r.amount), 0);

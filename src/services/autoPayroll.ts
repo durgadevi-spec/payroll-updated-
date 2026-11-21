@@ -21,7 +21,7 @@
  */
 import cron from 'node-cron';
 import { payrollPool, computePayrollPreviewData, getEligibleDaysForMonthServer } from '../routes/payrollRoutes';
-import { calculatePayroll } from '../lib/payrollCalculator';
+import { calculateHourlyExcessDeduction, calculatePayroll } from '../lib/payrollCalculator';
 import { getSalaryBreakdown } from '../lib/salaryBreakdown';
 
 const KEY_ENABLED = 'auto_payroll_enabled';
@@ -222,7 +222,11 @@ async function generatePayrollForMonth(month: number, year: number): Promise<{ p
     const unpaidLeaves = Math.max(0, totalUnpaid - nonLeaveDeductions);
     const missingTimesheets = 0;
     const effectiveMissingPunches = punchMissing + lessThan9;
-    const hourlyDeductionAmount = emp.summary.hourlyDeductionAmount || 0;
+    const hourlyDeductionBreakdown = calculateHourlyExcessDeduction(
+      emp.summary.deductibleShortfallHours || 0,
+      monthlySalary / calendarDays
+    );
+    const hourlyDeductionAmount = hourlyDeductionBreakdown.totalDeduction;
 
     const calc = calculatePayroll({
       monthlySalary,
@@ -274,6 +278,7 @@ async function generatePayrollForMonth(month: number, year: number): Promise<{ p
       permission_deduction: calc.permissionDeduction,
       hourly_short_hours: emp.summary.deductibleShortfallHours || 0,
       hourly_deduction: calc.hourlyDeductionAmount,
+      hourly_deduction_breakdown: hourlyDeductionBreakdown,
     });
   }
 
@@ -296,7 +301,7 @@ async function generatePayrollForMonth(month: number, year: number): Promise<{ p
       const cols = ['payroll_id', ...Object.keys(it)];
       // timesheet_excluded_dates / holiday_dates are JSONB columns → must be sent as JSON text
       const vals = [payrollId, ...Object.entries(it).map(([k, v]) =>
-        (k === 'timesheet_excluded_dates' || k === 'holiday_dates') ? JSON.stringify(v) : v)];
+        (k === 'timesheet_excluded_dates' || k === 'holiday_dates' || k === 'hourly_deduction_breakdown') ? JSON.stringify(v) : v)];
       const ph = cols.map((_, i) => `$${i + 1}`).join(',');
       const ins = await client.query(`INSERT INTO payroll_items (${cols.join(',')}) VALUES (${ph}) RETURNING id, employee_id`, vals);
       await client.query(

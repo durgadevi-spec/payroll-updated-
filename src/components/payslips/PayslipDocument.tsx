@@ -152,6 +152,13 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
   const perDaySalary = (item.monthly_salary || 0) / (item.working_days || 30);
   const sundayEarnings = Math.round(perDaySalary * (item.sunday_work_days || 0) * 100) / 100;
   const itemAny = item as any;
+  const hourlyBreakdown = itemAny.hourly_deduction_breakdown;
+  const hourlyDeductionDetails = Number(itemAny.hourly_deduction || 0) > 0 && hourlyBreakdown ? (
+    <div className="my-3 border border-neutral-400 px-2 py-1.5 text-[10px]">
+      <span className="font-bold">Hourly excess deduction breakdown: </span>
+      {hourlyBreakdown.totalHours}h = {hourlyBreakdown.fullDayBlocks} full day ({fmt(hourlyBreakdown.fullDayDeduction)}) + {hourlyBreakdown.halfDayBlocks} half day ({fmt(hourlyBreakdown.halfDayDeduction)}) + {hourlyBreakdown.remainingHours}h hourly ({fmt(hourlyBreakdown.remainingHoursDeduction)})
+    </div>
+  ) : null;
   const salaryBreakdown = getSalaryBreakdown(item.monthly_salary || 0);
 
   const earnings: PayslipRow[] = tpl.sections.earnings.rows.map(row => {
@@ -195,9 +202,16 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
     else if (row.key === 'tax' || row.key === 'tax_deduction') value = item.tax_deduction;
     else if (row.key === 'loan' || row.key === 'loan_deduction') value = item.loan_deduction;
     else if (row.key === 'advance' || row.key === 'advance_deduction') value = item.advance_deduction || 0;
-    else if (row.key === 'total_deductions') value = (item.leave_deduction || 0) + (item.timesheet_deduction || 0) + Number(itemAny.missing_punch_deduction || 0) + (item.pf_deduction || 0) + (item.esi_deduction || 0) + (item.tax_deduction || 0) + (item.loan_deduction || 0) + (item.advance_deduction || 0);
+    else if (row.key === 'hourly_deduction') value = Number(itemAny.hourly_deduction || 0);
+    else if (row.key === 'total_deductions') value = (item.leave_deduction || 0) + (item.timesheet_deduction || 0) + Number(itemAny.missing_punch_deduction || 0) + Number(itemAny.hourly_deduction || 0) + (item.pf_deduction || 0) + (item.esi_deduction || 0) + (item.tax_deduction || 0) + (item.loan_deduction || 0) + (item.advance_deduction || 0);
     return { label: row.label, value, key: row.key, hideIfZero: row.hideIfZero, isTotal: row.isTotal };
   });
+
+  if (!deductions.some(row => row.key === 'hourly_deduction') && Number(itemAny.hourly_deduction || 0) > 0 && !editing) {
+    const row = { label: 'Hourly excess deduction', value: Number(itemAny.hourly_deduction), key: 'hourly_deduction', hideIfZero: true };
+    const totalIndex = deductions.findIndex(deduction => deduction.key === 'total_deductions');
+    deductions.splice(totalIndex >= 0 ? totalIndex : deductions.length, 0, row);
+  }
 
   const grossEarnings = earnings.reduce((sum, e) => sum + (Number(e.value) || 0), 0);
 
@@ -205,6 +219,7 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
     return (
       <div id={domId} style={{ width: '800px' }}>
         <VisualPayslipPage config={templateContent.visualConfig} data={payslipToVisualData(payslip)} />
+        {hourlyDeductionDetails}
       </div>
     );
   }
@@ -446,6 +461,8 @@ export function PayslipDocument({ payslip, templateContent, editable, onUpdateVa
             })}
           </tbody>
         </table>
+
+        {hourlyDeductionDetails}
 
         {/* Net pay */}
         <table className="w-full border-collapse mb-10 table-fixed">

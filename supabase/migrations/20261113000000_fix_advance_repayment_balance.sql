@@ -7,7 +7,7 @@ WHERE legacy.is_legacy
     SELECT 1
     FROM public.advance_repayments payroll_repayment
     WHERE payroll_repayment.advance_id = legacy.advance_id
-      AND payroll_repayment.notes = 'Seeded from paid payroll deduction; assigned to oldest advance only'
+      AND payroll_repayment.notes LIKE 'Seeded from paid payroll deduction; assigned to oldest advance only%'
   );
 
 UPDATE public.advances a

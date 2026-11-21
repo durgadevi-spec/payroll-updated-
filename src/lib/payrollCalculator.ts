@@ -43,6 +43,44 @@ export interface PayrollCalculationResult {
   hourlyDeductionAmount: number;
 }
 
+export interface HourlyExcessDeductionBreakdown {
+  totalHours: number;
+  fullDayBlocks: number;
+  halfDayBlocks: number;
+  remainingHours: number;
+  fullDayDeduction: number;
+  halfDayDeduction: number;
+  remainingHoursDeduction: number;
+  totalDeduction: number;
+}
+
+export function calculateHourlyExcessDeduction(
+  totalHours: number,
+  perDaySalary: number
+): HourlyExcessDeductionBreakdown {
+  const excessHours = Math.max(0, Math.round(totalHours * 100) / 100);
+  const fullDayBlocks = Math.floor((excessHours + Number.EPSILON) / 8);
+  const hoursAfterFullDays = Math.round((excessHours - fullDayBlocks * 8) * 100) / 100;
+  const halfDayBlocks = Math.floor((hoursAfterFullDays + Number.EPSILON) / 4);
+  const remainingHours = Math.round((hoursAfterFullDays - halfDayBlocks * 4) * 100) / 100;
+  const roundMoney = (amount: number) => Math.round((amount + Number.EPSILON) * 100) / 100;
+
+  const fullDayDeduction = roundMoney(fullDayBlocks * perDaySalary);
+  const halfDayDeduction = roundMoney(halfDayBlocks * perDaySalary / 2);
+  const remainingHoursDeduction = roundMoney(remainingHours * perDaySalary / 9);
+
+  return {
+    totalHours: excessHours,
+    fullDayBlocks,
+    halfDayBlocks,
+    remainingHours,
+    fullDayDeduction,
+    halfDayDeduction,
+    remainingHoursDeduction,
+    totalDeduction: roundMoney(fullDayDeduction + halfDayDeduction + remainingHoursDeduction),
+  };
+}
+
 export function calculatePayroll(input: PayrollCalculationInput): PayrollCalculationResult {
   const {
     monthlySalary,

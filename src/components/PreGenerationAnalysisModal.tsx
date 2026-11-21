@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Check, AlertTriangle, Calendar, ChevronLeft, ChevronRight, ChevronDown } from 'lucide-react';
+import { calculateHourlyExcessDeduction } from '../lib/payrollCalculator';
 
 interface PreviewProps {
   isOpen: boolean;
@@ -157,15 +158,15 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
   };
 
   const wrapperClass = fullPage
-    ? 'fixed inset-0 z-50 flex items-stretch justify-center bg-slate-900/50 backdrop-blur-sm overflow-hidden'
+    ? 'fixed inset-0 z-50 flex items-stretch justify-center p-4 sm:p-6 bg-slate-900/50 backdrop-blur-sm overflow-y-auto'
     : 'fixed inset-0 z-50 flex items-start justify-center pt-4 pb-4 px-4 bg-slate-900/50 backdrop-blur-sm overflow-y-auto';
 
   const containerClass = fullPage
-    ? 'bg-white dark:bg-slate-900 w-full h-full flex flex-col'
+    ? 'bg-white dark:bg-slate-900 rounded-xl shadow-xl ring-1 ring-black/5 w-full h-full max-w-full max-h-full flex flex-col'
     : 'bg-white dark:bg-slate-900 rounded-xl shadow-xl ring-1 ring-black/5 w-full max-w-6xl flex flex-col';
 
   const containerStyle: any = fullPage
-    ? { minHeight: '100vh', maxHeight: '100vh' }
+    ? undefined
     : { minHeight: '80vh', maxHeight: '95vh' };
 
   return (
@@ -390,7 +391,10 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                         {emp.summary.halfDayLeaves > 0 && <Stat label="Half-day leaves" value={emp.summary.halfDayLeaves} />}
                         <Stat label="Permission used" value={parseFloat(emp.summary.monthlyAllowanceUsed).toFixed(1) + 'h'} />
                         {emp.summary.permissionLimitExceededDays > 0 && <Stat label="Perm. exceeded" value={emp.summary.permissionLimitExceededDays} tone="bad" />}
-                        {emp.summary.deductibleShortfallHours > 0 && <Stat label="Hourly ded." value={'₹' + Math.round(emp.summary.hourlyDeductionAmount || 0).toLocaleString('en-IN')} tone="bad" />}
+                        {emp.summary.deductibleShortfallHours > 0 && <Stat label="Hourly ded." value={'₹' + Math.round(calculateHourlyExcessDeduction(
+                          emp.summary.deductibleShortfallHours || 0,
+                          (emp.ctc || 0) / 12 / (emp.days?.length || 30)
+                        ).totalDeduction).toLocaleString('en-IN')} tone="bad" />}
                       </div>
                     )}
                   </div>
@@ -407,6 +411,7 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                           <th className="text-center px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-r border-slate-200 dark:border-slate-700 w-28">Permission</th>
                           <th className="text-center px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-r border-slate-200 dark:border-slate-700 w-16">Eligible</th>
                           <th className="text-center px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-r border-slate-200 dark:border-slate-700 w-32">Attendance</th>
+                          <th className="text-center px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-r border-slate-200 dark:border-slate-700 w-28">Timesheet</th>
                           <th className="text-left px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-r border-slate-200 dark:border-slate-700 w-36">LMS leave</th>
                           <th className="text-center px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide whitespace-nowrap border-b border-r border-slate-200 dark:border-slate-700 w-32">Paid / unpaid</th>
                           <th className="text-left px-3 py-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide border-b border-slate-200 dark:border-slate-700">Deduction reason</th>
@@ -419,6 +424,10 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                           const isSunday = day.day === 'Sun';
                           const isSat = day.day === 'Sat';
                           const isWeekend = isSunday || isSat;
+                          const timesheetStatus = day.timesheet_status === 'Missing' &&
+                            (day.attendance_status === 'N/A' || day.lms_leave_status === 'Approved')
+                            ? 'N/A'
+                            : (day.timesheet_status || 'N/A');
                           const zebra = idx % 2 === 1;
                           return (
                             <tr
@@ -507,6 +516,21 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                                 </span>
                               </td>
 
+                              {/* Timesheet */}
+                              <td className="px-3 py-2.5 text-center border-r border-slate-100 dark:border-slate-800">
+                                <span className={`text-[11px] px-2 py-0.5 rounded font-medium whitespace-nowrap ${
+                                  timesheetStatus === 'Submitted'
+                                    ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400'
+                                    : timesheetStatus === 'Missing'
+                                      ? 'bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-400'
+                                      : timesheetStatus === 'Unavailable'
+                                        ? 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-400'
+                                        : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'
+                                }`}>
+                                  {timesheetStatus}
+                                </span>
+                              </td>
+
                               {/* LMS Leave */}
                               <td className="px-3 py-2.5 border-r border-slate-100 dark:border-slate-800">
                                 <div className="flex flex-col gap-0.5">
@@ -570,7 +594,11 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                       const leaveDeduction = Math.round(perDay * unpaidLeaveDays);
                       const punchDeduction = Math.round(perDay * nonLeaveDeductions);
                       const permDeduction = 0; // superseded by precise hourly deduction below (kept at 0 to avoid double count)
-                      const hourlyDeductionAmount = Math.round(emp.summary.hourlyDeductionAmount || 0);
+                      const hourlyDeductionBreakdown = calculateHourlyExcessDeduction(
+                        emp.summary.deductibleShortfallHours || 0,
+                        (emp.ctc || 0) / 12 / calDays
+                      );
+                      const hourlyDeductionAmount = hourlyDeductionBreakdown.totalDeduction;
                       const totalDeductions = leaveDeduction + punchDeduction + permDeduction + hourlyDeductionAmount;
                       const netSalary = Math.max(0, baseSalary - totalDeductions);
                       const fmt = (n: number) => '₹' + n.toLocaleString('en-IN');
@@ -601,7 +629,9 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                             <div className="px-4 py-3 border-r border-slate-100 dark:border-slate-800">
                               <p className="text-[11px] text-slate-500 dark:text-slate-400 mb-0.5">Hourly ded. (&lt;9h/day)</p>
                               <p className={`text-sm font-semibold tabular-nums ${hourlyDeductionAmount > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-400'}`}>{hourlyDeductionAmount > 0 ? `−${fmt(hourlyDeductionAmount)}` : '—'}</p>
-                              <p className="text-[11px] text-slate-400 mt-0.5">{(emp.summary.deductibleShortfallHours || 0).toFixed(1)}h short</p>
+                              <p className="text-[11px] text-slate-400 mt-0.5">
+                                {hourlyDeductionBreakdown.totalHours}h: {hourlyDeductionBreakdown.fullDayBlocks} full day + {hourlyDeductionBreakdown.halfDayBlocks} half day + {hourlyDeductionBreakdown.remainingHours}h hourly
+                              </p>
                             </div>
                             <div className="px-4 py-3 bg-emerald-50/60 dark:bg-emerald-500/5">
                               <p className="text-[11px] text-emerald-700 dark:text-emerald-400 font-medium mb-0.5">Estimated net salary</p>
@@ -626,12 +656,15 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                       const extraPerm = Math.max(0, totalMissing - punchMissing - nonWorkingPerm);
                       // Covered = whatever the 3h monthly pool absorbed (total chargeable - what is deducted)
                       const covered = Math.max(0, totalMissing - deductible);
-                      const amount = Math.round(emp.summary.hourlyDeductionAmount || 0);
+                      const deductionBreakdown = calculateHourlyExcessDeduction(
+                        deductible,
+                        (emp.ctc || 0) / 12 / (emp.days?.length || 30)
+                      );
+                      const amount = Math.round(deductionBreakdown.totalDeduction);
                       const allowanceUsed = parseFloat(emp.summary.monthlyAllowanceUsed || 0);
                       const onProbation = !!emp.is_on_probation;
                       const monthlyCap = onProbation ? 0 : 3; // first 6 months: no free permission allowance
                       const lopHours = Math.max(0, deductible); // hours beyond what LMS permission / 3h allowance could cover
-                      if (totalMissing <= 0) return null;
                       return (
                         <div className="mx-4 mb-5 rounded-lg border border-amber-200 dark:border-amber-900/40 bg-amber-50/40 dark:bg-amber-500/5">
                           <div className="px-4 py-2.5 border-b border-amber-200 dark:border-amber-900/40 flex items-center justify-between">
@@ -665,7 +698,9 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                             <div className="px-4 py-3 bg-red-50/60 dark:bg-red-500/5">
                               <p className="text-[11px] text-red-700 dark:text-red-400 font-medium mb-0.5">Deducted salary (balance)</p>
                               <p className="text-base font-bold text-red-700 dark:text-red-400 tabular-nums">−₹{amount.toLocaleString('en-IN')}</p>
-                              <p className="text-[11px] text-slate-400 mt-0.5">of ₹{monthlySalary.toLocaleString('en-IN')} monthly salary</p>
+                              <p className="text-[11px] text-slate-400 mt-0.5">
+                                {deductionBreakdown.fullDayBlocks} full day + {deductionBreakdown.halfDayBlocks} half day + {deductionBreakdown.remainingHours}h hourly; of ₹{monthlySalary.toLocaleString('en-IN')} monthly salary
+                              </p>
                             </div>
                           </div>
                         </div>

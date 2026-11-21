@@ -36,6 +36,39 @@ function getMonthName(month: number) {
   return names[month - 1] || 'Unknown';
 }
 
+function getTimesheetPunchOverlapDates(
+  missingDates: string[],
+  missingPunchDates: string[],
+  exceptedPunchDates: string[]
+) {
+  const payablePunchDates = new Set(missingPunchDates.filter((date) => !exceptedPunchDates.includes(date)));
+  return [...new Set(missingDates.filter((date) => payablePunchDates.has(date)))];
+}
+
+function getDeductibleTimesheetDays(
+  missingDays: number,
+  exceptionDays: number,
+  missingDates: string[],
+  missingPunchDates: string[],
+  exceptedPunchDates: string[]
+) {
+  const overlapCount = getTimesheetPunchOverlapDates(missingDates, missingPunchDates, exceptedPunchDates).length;
+  return Math.max(0, missingDays - exceptionDays - overlapCount);
+}
+
+function parseDateArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((date): date is string => typeof date === 'string');
+  if (typeof value === 'string' && value) {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.filter((date): date is string => typeof date === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 // Runs `mapper` over `items` with at most `limit` in flight at once, preserving input order
 // in the returned array (regardless of which items finish first). Used instead of a plain
 // `Promise.all(items.map(...))` for per-employee DB work — full unbounded concurrency was
@@ -1362,21 +1395,80 @@ export async function computePayrollPreviewData(employeeIds: string[], month: nu
       }
     }
     const timesheets = new Map<string, Set<string>>(); // employee_id -> Set of date strings
+    let timesheetDataAvailable = false;
     if (tsClient) {
-      // Get all submission dates for this month for the selected employees
-      const empIdList = employees.map((e: any) => e.id);
+      // Map the employee codes used by time_entries back to payroll employee IDs.
+      const employeeIdByTimesheetCode = new Map<string, string>();
+      const employeeIdByPayrollCode = new Map<string, string>();
+      const employeeIdByEmail = new Map<string, string>();
+      const employeeIdByName = new Map<string, string>();
+      const lookupCodes = new Set<string>();
+      for (const emp of employees) {
+        const code = typeof emp.employee_code === 'string' ? emp.employee_code.trim().toUpperCase() : '';
+        if (code) {
+          lookupCodes.add(code);
+          employeeIdByTimesheetCode.set(code, emp.id);
+          employeeIdByPayrollCode.set(code, emp.id);
+        }
+        const email = typeof emp.email === 'string' ? emp.email.trim().toLowerCase() : '';
+        const name = typeof emp.name === 'string' ? emp.name.trim().toLowerCase() : '';
+        if (email) employeeIdByEmail.set(email, emp.id);
+        if (name && !employeeIdByName.has(name)) employeeIdByName.set(name, emp.id);
+      }
+      for (const emp of employees) {
+        const aliases = [
+          emp.email,
+          emp.name,
+          ...(String(emp.name || '').toUpperCase().includes('REBECA') ? ['E0046'] : []),
+        ]
+          .filter((alias: any) => typeof alias === 'string' && alias.trim())
+          .map((alias: string) => alias.trim().toUpperCase());
+        for (const alias of aliases) {
+          lookupCodes.add(alias);
+          if (!employeeIdByTimesheetCode.has(alias)) employeeIdByTimesheetCode.set(alias, emp.id);
+        }
+      }
+
       try {
-        const tsRes = await tsClient.query(
-          `SELECT employee_id, date FROM daily_submissions
-           WHERE employee_id = ANY($1)
-             AND EXTRACT(MONTH FROM date::date) = $2
-             AND EXTRACT(YEAR FROM date::date) = $3`,
-          [empIdList, month, year]
-        );
-        for (const row of tsRes.rows) {
-          const empId = row.employee_id;
-          if (!timesheets.has(empId)) timesheets.set(empId, new Set<string>());
-          timesheets.get(empId)!.add(formatLocalDate(row.date));
+        try {
+          const timesheetEmployees = await tsClient.query(
+            'SELECT name, email, employee_code FROM employees WHERE employee_code IS NOT NULL'
+          );
+          for (const timesheetEmployee of timesheetEmployees.rows) {
+            const code = String(timesheetEmployee.employee_code || '').trim().toUpperCase();
+            if (!code) continue;
+            const email = String(timesheetEmployee.email || '').trim().toLowerCase();
+            const name = String(timesheetEmployee.name || '').trim().toLowerCase();
+            const empId = employeeIdByPayrollCode.get(code) || employeeIdByEmail.get(email) || employeeIdByName.get(name);
+            if (!empId) continue;
+            lookupCodes.add(code);
+            employeeIdByTimesheetCode.set(code, empId);
+          }
+        } catch (mappingErr: any) {
+          console.warn('[PREVIEW] Timesheet employee mapping query failed:', mappingErr.message);
+        }
+
+        if (lookupCodes.size > 0) {
+          const monthStart = `${year}-${String(month).padStart(2, '0')}-01`;
+          const monthEnd = `${year}-${String(month).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`;
+          const tsRes = await tsClient.query(
+            `SELECT UPPER(TRIM(employee_code)) AS employee_code,
+                    TO_CHAR(CAST(date AS date), 'YYYY-MM-DD') AS date_str
+             FROM time_entries
+             WHERE UPPER(TRIM(employee_code)) = ANY($1)
+               AND CAST(date AS date) >= $2::date
+               AND CAST(date AS date) <= $3::date
+               AND LOWER(status) NOT IN ('draft', 'rejected')
+             GROUP BY UPPER(TRIM(employee_code)), CAST(date AS date)`,
+            [Array.from(lookupCodes), monthStart, monthEnd]
+          );
+          for (const row of tsRes.rows) {
+            const empId = employeeIdByTimesheetCode.get(row.employee_code);
+            if (!empId) continue;
+            if (!timesheets.has(empId)) timesheets.set(empId, new Set<string>());
+            timesheets.get(empId)!.add(row.date_str);
+          }
+          timesheetDataAvailable = true;
         }
       } catch (tsErr: any) {
         console.warn('[PREVIEW] Timesheet query failed:', tsErr.message);
@@ -1861,7 +1953,7 @@ export async function computePayrollPreviewData(employeeIds: string[], month: nu
           total_hours: totalHours.toFixed(1),
           required_hours: 9,
           attendance_status: isSunday || isHoliday ? 'N/A' : attStatus,
-          timesheet_status: hasTs ? 'Submitted' : 'Missing',
+          timesheet_status: timesheetDataAvailable ? (hasTs ? 'Submitted' : 'Missing') : 'Unavailable',
           lms_leave_status: lmsStatus,
           leave_type: leave ? leave.type : '-',
           paid_unpaid: paidUnpaid,
@@ -3048,10 +3140,13 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
       let missingPunchDeduction = 0;
       const missingPunchDates: string[] = [];
       let missingPunchExceptedDatesApplied: string[] = [];
+      let timesheetDuplicateDates: string[] = [];
       const coveredByLeaveDates: string[] = []; // Missing punch days covered by approved leave
       const fullyPunchedDatesSet = new Set();
       const incompletePunchedDatesSet = new Set<string>();
       const incompletePunchTimes: Record<string, string> = {};
+      const halfDayAttendanceDetails: { date: string; hours: number; deduction_days: number }[] = [];
+      let halfDayAttendanceDetailsAvailable = false;
       let sandwichDeductedDays = 0;
       let sandwichDeductionAmount = 0;
       const sandwichDates: string[] = [];
@@ -3072,14 +3167,34 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
             [empCode, payroll.month, payroll.year]
           );
 
+          halfDayAttendanceDetailsAvailable = true;
           attRes.rows.forEach((r: any) => {
             const pIn = new Date(r.first_punch);
             const pOut = new Date(r.last_punch);
+            const hours = (pOut.getTime() - pIn.getTime()) / (1000 * 60 * 60);
+            const date = String(r.att_date).substring(0, 10);
             if (pIn.getTime() === pOut.getTime()) {
-              incompletePunchedDatesSet.add(r.att_date);
-              incompletePunchTimes[r.att_date] = pIn.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+              incompletePunchedDatesSet.add(date);
+              incompletePunchTimes[date] = pIn.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
             } else {
-              fullyPunchedDatesSet.add(r.att_date);
+              fullyPunchedDatesSet.add(date);
+            }
+
+            const dateValue = new Date(`${date}T00:00:00`);
+            if (
+              hours > 0 &&
+              hours < 5 &&
+              dateValue.getDay() !== 0 &&
+              !holidaySet.has(date) &&
+              !leaveDateSet.has(date) &&
+              (!joiningDateStr || date >= joiningDateStr) &&
+              (!relievingDateStr || date <= relievingDateStr)
+            ) {
+              halfDayAttendanceDetails.push({
+                date,
+                hours: Math.round(hours * 10) / 10,
+                deduction_days: 0.5,
+              });
             }
           });
 
@@ -3126,6 +3241,22 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
             missingPunchDeduction = Math.round(perDaySalary * payableMissingPunchDays * 100) / 100;
           }
 
+          if (tsData !== null && tsData.missing_dates) {
+            timesheetDuplicateDates = getTimesheetPunchOverlapDates(
+              actualMissingDates,
+              missingPunchDates,
+              missingPunchExceptedDatesApplied
+            );
+            const payableTimesheetDays = getDeductibleTimesheetDays(
+              actualMissingTsDays,
+              tsExceptionDaysApplied,
+              actualMissingDates,
+              missingPunchDates,
+              missingPunchExceptedDatesApplied
+            );
+            timesheetDeduction = Math.round(perDaySalary * payableTimesheetDays * 100) / 100;
+          }
+
           // Sandwich Deduction: if Saturday and Monday have NO punches, deduct Sunday
           // NOTE: A Saturday/Monday covered by approved leave or OD (leaveDateSet — which
           // already includes OD dates, see uniqueAllLeaveDates above) is NOT an unpaid
@@ -3161,6 +3292,7 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
             console.log(`[ANALYSIS] ✅ ${item.employee_name}: ${coveredByLeaveDates.length} missing punch days covered by approved leave — no deduction`);
           }
         } catch (attErr) {
+          halfDayAttendanceDetailsAvailable = false;
           console.error(`[ANALYSIS] Attendance query failed for ${item.employee_name}:`, attErr);
         }
       }
@@ -3237,6 +3369,14 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
         uncovered_comp_off_dates: (leaveData as any)?.comp_off_uncovered_dates ?? [],
         missing_timesheets: actualMissingTsDays,
         missing_dates: actualMissingDates,
+        timesheet_duplicate_dates: timesheetDuplicateDates,
+        timesheet_deductible_days: getDeductibleTimesheetDays(
+          actualMissingTsDays,
+          tsExceptionDaysApplied,
+          actualMissingDates,
+          missingPunchDates,
+          missingPunchExceptedDatesApplied
+        ),
         leave_matched_ts_days: leaveMatchedTsDays,
         timesheet_deduction: timesheetDeduction,
         timesheet_exception_type: tsExceptionType,
@@ -3282,6 +3422,8 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
         unpaid_leave_details: (leaveData as any)?.unpaid_leave_details ?? [],
         leave_details: (leaveData as any)?.leave_details ?? [],
         attendance_dates: Array.from(fullyPunchedDatesSet),
+        half_day_attendance_details: halfDayAttendanceDetails,
+        half_day_attendance_details_available: halfDayAttendanceDetailsAvailable,
       };
     });
 
@@ -3539,7 +3681,7 @@ router.patch('/payroll-items/:id', async (req, res) => {
 // capped at the employee's current missing day count).
 router.patch('/payroll-items/:id/timesheet-exception', async (req, res) => {
   const { id } = req.params;
-  const { exception_type, exception_days, note, missing_timesheets } = req.body;
+  const { exception_type, exception_days, note, missing_timesheets, missing_dates, missing_punch_dates } = req.body;
 
   const validTypes = ['none', 'full', 'partial'];
   const type = validTypes.includes(exception_type) ? exception_type : 'none';
@@ -3594,7 +3736,16 @@ router.patch('/payroll-items/:id/timesheet-exception', async (req, res) => {
     if (type === 'full') exceptionDaysApplied = missingDays;
     else if (type === 'partial') exceptionDaysApplied = requestedDays;
 
-    const payableMissingDays = Math.max(0, missingDays - exceptionDaysApplied);
+    const missingDates = parseDateArray(missing_dates);
+    const missingPunchDates = parseDateArray(missing_punch_dates);
+    const exceptedPunchDates = parseDateArray(item.missing_punch_exception_dates);
+    const payableMissingDays = getDeductibleTimesheetDays(
+      missingDays,
+      exceptionDaysApplied,
+      missingDates,
+      missingPunchDates,
+      exceptedPunchDates
+    );
     const newTsDeduction = Math.round(dayRate * payableMissingDays * 100) / 100;
 
     // Recompute net salary from the item's other already-stored deductions
@@ -3639,7 +3790,11 @@ router.patch('/payroll-items/:id/timesheet-exception', async (req, res) => {
 
     );
 
-    res.json({ ...updateRes.rows[0], timesheet_exception_days_applied: exceptionDaysApplied });
+    res.json({
+      ...updateRes.rows[0],
+      timesheet_exception_days_applied: exceptionDaysApplied,
+      timesheet_deductible_days: payableMissingDays
+    });
   } catch (err) {
     console.error('Error setting timesheet exception:', err);
     res.status(500).json({ error: 'Failed to set timesheet exception' });
@@ -3656,7 +3811,7 @@ router.patch('/payroll-items/:id/timesheet-exception', async (req, res) => {
 // entirely, or the full missing-dates list to except all of them).
 router.patch('/payroll-items/:id/missing-punch-exception', async (req, res) => {
   const { id } = req.params;
-  const { excepted_dates, note, missing_punch_dates } = req.body;
+  const { excepted_dates, note, missing_punch_dates, missing_dates, missing_timesheets } = req.body;
 
   if (excepted_dates !== undefined && !Array.isArray(excepted_dates)) {
     return res.status(400).json({ error: 'excepted_dates must be an array of date strings' });
@@ -3692,9 +3847,9 @@ router.patch('/payroll-items/:id/missing-punch-exception', async (req, res) => {
     // looking at when granting the exception, if the frontend sends it; fall
     // back to the stored value otherwise. Only dates that are genuinely in
     // that missing-punch list can be excepted — arbitrary dates are ignored.
-    const currentMissingDates: string[] = Array.isArray(missing_punch_dates)
-      ? missing_punch_dates
-      : (Array.isArray(item.missing_punch_dates) ? item.missing_punch_dates : []);
+    const currentMissingDates = missing_punch_dates !== undefined
+      ? parseDateArray(missing_punch_dates)
+      : parseDateArray(item.missing_punch_dates);
     const currentMissingSet = new Set(currentMissingDates);
 
     const requestedExceptedDates: string[] = Array.isArray(excepted_dates) ? excepted_dates : [];
@@ -3702,11 +3857,34 @@ router.patch('/payroll-items/:id/missing-punch-exception', async (req, res) => {
 
     const payableMissingPunchDays = Math.max(0, currentMissingDates.length - validExceptedDates.length);
     const newMpDeduction = Math.round(dayRate * payableMissingPunchDays * 100) / 100;
+    const currentMissingTsDates = parseDateArray(missing_dates);
+    const missingTsDaysFromBody = missing_timesheets !== undefined ? parseInt(missing_timesheets) : NaN;
+    const missingTsDays = Number.isFinite(missingTsDaysFromBody) && missingTsDaysFromBody >= 0
+      ? missingTsDaysFromBody
+      : (Number(item.missing_timesheets) || 0);
+    const tsExceptionType = String(item.timesheet_exception_type || 'none');
+    const tsExceptionDays = tsExceptionType === 'full'
+      ? missingTsDays
+      : (tsExceptionType === 'partial'
+        ? Math.min(Number(item.timesheet_exception_days) || 0, missingTsDays)
+        : 0);
+    const payableMissingTsDays = Array.isArray(missing_dates)
+      ? getDeductibleTimesheetDays(
+        missingTsDays,
+        tsExceptionDays,
+        currentMissingTsDates,
+        currentMissingDates,
+        validExceptedDates
+      )
+      : null;
+    const currentTsDeduction = payableMissingTsDays === null
+      ? parseFloat(item.timesheet_deduction || '0')
+      : Math.round(dayRate * payableMissingTsDays * 100) / 100;
 
     // Recompute net salary from the item's other already-stored deductions
     // (mirrors the logic in the timesheet-exception endpoint above).
     const leaveDeduction = parseFloat(item.leave_deduction || '0');
-    const tsDeduction = parseFloat(item.timesheet_deduction || '0');
+    const tsDeduction = currentTsDeduction;
     const pfDeduction = parseFloat(item.pf_deduction || '0');
     const esiDeduction = parseFloat(item.esi_deduction || '0');
     const taxDeduction = parseFloat(item.tax_deduction || '0');
@@ -3730,9 +3908,10 @@ router.patch('/payroll-items/:id/missing-punch-exception', async (req, res) => {
         missing_punch_exception_note = $2,
         missing_punch_exception_granted_at = CASE WHEN $3::int = 0 THEN NULL ELSE now() END,
         missing_punch_deduction = $4,
-        net_salary = $5
-       WHERE id = $6 RETURNING *`,
-      [JSON.stringify(validExceptedDates), noteValue, validExceptedDates.length, newMpDeduction, netSalary, id]
+        timesheet_deduction = $5,
+        net_salary = $6
+       WHERE id = $7 RETURNING *`,
+      [JSON.stringify(validExceptedDates), noteValue, validExceptedDates.length, newMpDeduction, tsDeduction, netSalary, id]
     );
 
     await client.query(
@@ -3742,7 +3921,11 @@ router.patch('/payroll-items/:id/missing-punch-exception', async (req, res) => {
       [item.payroll_id]
     );
 
-    res.json({ ...updateRes.rows[0], missing_punch_exception_dates: validExceptedDates });
+    res.json({
+      ...updateRes.rows[0],
+      missing_punch_exception_dates: validExceptedDates,
+      ...(payableMissingTsDays === null ? {} : { timesheet_deductible_days: payableMissingTsDays })
+    });
   } catch (err) {
     console.error('Error setting missing punch exception:', err);
     res.status(500).json({ error: 'Failed to set missing punch exception' });
