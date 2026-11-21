@@ -221,7 +221,7 @@ async function generatePayrollForMonth(month: number, year: number): Promise<{ p
     const nonLeaveDeductions = punchMissing + sundayDeductions + lessThan9;
     const unpaidLeaves = Math.max(0, totalUnpaid - nonLeaveDeductions);
     const missingTimesheets = 0;
-    const effectiveMissingPunches = punchMissing + lessThan9;
+    const effectiveMissingPunches = punchMissing;
     const hourlyDeductionBreakdown = calculateHourlyExcessDeduction(
       emp.summary.deductibleShortfallHours || 0,
       monthlySalary / calendarDays

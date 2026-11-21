@@ -72,6 +72,11 @@ async function applyMigration({ name, url, files }) {
     await client.query('CREATE EXTENSION IF NOT EXISTS pgcrypto;');
 
     for (const file of files) {
+      if (file === '20261121120000_add_paid_payroll_balance_adjustments.sql' && name !== 'Payroll DB') {
+        console.log(`Skipping payroll-only migration for ${name}: ${file}`);
+        continue;
+      }
+
       const sqlFilePath = path.join(migrationsPath, file);
       console.log(`\nApplying migration for ${name} from ${file}`);
 

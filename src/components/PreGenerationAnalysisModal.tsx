@@ -592,7 +592,7 @@ export function PreGenerationAnalysisModal({ isOpen, onClose, onConfirm, employe
                       const unpaidLeaveDays = Math.max(0, totalUnpaid - nonLeaveDeductions);
 
                       const leaveDeduction = Math.round(perDay * unpaidLeaveDays);
-                      const punchDeduction = Math.round(perDay * nonLeaveDeductions);
+                      const punchDeduction = Math.round(perDay * (punchMissingDays + sundayDeductions));
                       const permDeduction = 0; // superseded by precise hourly deduction below (kept at 0 to avoid double count)
                       const hourlyDeductionBreakdown = calculateHourlyExcessDeduction(
                         emp.summary.deductibleShortfallHours || 0,

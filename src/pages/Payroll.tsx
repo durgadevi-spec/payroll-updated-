@@ -35,6 +35,12 @@ interface PayrollItemWithEmployee extends PayrollItem {
   holiday_dates?: string[];
   sandwich_dates?: string[];
   sandwich_deduction_amount?: number;
+  paid_balance_adjustment_applied?: boolean;
+  paid_balance_previous_amount?: number;
+  paid_balance_previous_advance_repayment?: number;
+  paid_balance_previous_version?: number;
+  paid_balance_recalculated_total?: number;
+  paid_balance_overpayment?: number;
 }
 
 const getItemDaysForRate = (item: PayrollItemWithEmployee) => {
@@ -48,6 +54,30 @@ const getItemDaysForRate = (item: PayrollItemWithEmployee) => {
 const safeNumber = (value: any, fallback = 0) => {
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? numberValue : fallback;
+};
+
+type LiveBalanceAnalysisItem = {
+  id: string;
+  employee_id?: string;
+  employee?: { id?: string };
+  employee_name?: string;
+  net_salary?: number | string;
+  missing_timesheets?: number | string;
+  timesheet_deductible_days?: number | string;
+  timesheet_excluded_dates?: string[];
+  timesheet_exception_type?: string | null;
+  timesheet_exception_days?: number | string;
+  timesheet_exception_note?: string | null;
+  missing_punches?: number | string;
+  missing_punch_exception_dates?: string[];
+  missing_punch_exception_note?: string | null;
+  sandwich_deducted_days?: number | string;
+  permission_hours?: number | string;
+  holiday_dates?: string[];
+  paid_balance_adjustment_applied?: boolean;
+  paid_balance_previous_version?: number | null;
+  paid_balance_recalculated_total?: number | string | null;
+  paid_balance_overpayment?: number | string | null;
 };
 
 // Given an employee's joining_date ('YYYY-MM-DD') and a payroll month/year,
@@ -232,6 +262,10 @@ const getMissingPunchExceptionDates = (item: PayrollItemWithEmployee): string[] 
 };
 
 const getNetSalary = (item: PayrollItemWithEmployee, month?: number, year?: number) => {
+  if (item.paid_balance_adjustment_applied) {
+    return safeNumber(item.net_salary, 0);
+  }
+
   const monthlySalary = safeNumber(item.monthly_salary, 0);
   const leaveDeduction = safeNumber(item.leave_deduction, 0);
   const tsDeduction = getTimesheetDeduction(item);
@@ -311,6 +345,7 @@ export function Payroll() {
   const [calculationType, setCalculationType] = useState<'monthly' | 'custom' | 'working_days'>('monthly');
   const [customDaysInput, setCustomDaysInput] = useState('30');
   const [showRegenReasonModal, setShowRegenReasonModal] = useState(false);
+  const [showPaidBalanceChoiceModal, setShowPaidBalanceChoiceModal] = useState(false);
   const [pendingGenerateData, setPendingGenerateData] = useState<any>(null);
   const [regenReasonInput, setRegenReasonInput] = useState('');
   const [regenSubmitting, setRegenSubmitting] = useState(false);
@@ -375,12 +410,12 @@ export function Payroll() {
 
       setPayrollItems(data || []);
 
-      // Recalculate the correct total from the live net_salary values (which apply LMS, PL/SL, permission logic)
-      const correctTotal = (data || []).reduce((sum, item) => sum + safeNumber(item.net_salary, 0), 0);
-      // Update UI immediately so the Payroll History row shows the right Total Amount
-      setPayrolls(prev => prev.map(p => p.id === payrollId ? { ...p, total_amount: correctTotal } : p));
-      // Persist to DB so the value is correct on next page load too
-      await supabase.from('payrolls').update({ total_amount: correctTotal }).eq('id', payrollId);
+      const viewedPayroll = payrolls.find(payroll => payroll.id === payrollId);
+      if (viewedPayroll && viewedPayroll.status !== 'paid' && !viewedPayroll.is_locked) {
+        const correctTotal = (data || []).reduce((sum, item) => sum + safeNumber(item.net_salary, 0), 0);
+        setPayrolls(prev => prev.map(p => p.id === payrollId ? { ...p, total_amount: correctTotal } : p));
+        await supabase.from('payrolls').update({ total_amount: correctTotal }).eq('id', payrollId);
+      }
     } catch (error) {
       console.error('Error loading payroll details:', error);
       if (latestPayrollItemsRequestIdRef.current === payrollId) {
@@ -558,10 +593,11 @@ export function Payroll() {
     setRefreshing(false);
   }
 
-  async function generatePayroll(dataOverride?: any, regenReason?: string) {
+  async function generatePayroll(dataOverride?: any, regenReason?: string, balanceMode: 'full' | 'balance' = 'full') {
     const dataToUse = dataOverride || previewData;
     if (!dataToUse) return;
 
+    let generatedPayrollId: string | null = null;
     try {
       // Version = how many payrolls already exist for this month/year, plus this new one.
       // First generation for a month is V1; every regeneration after that increments.
@@ -592,10 +628,99 @@ export function Payroll() {
         }
       });
 
+      const previousPaidByEmployee = new Map<string, {
+        amount: number;
+        advanceRepayment: number;
+        payrollId: string;
+        version: number;
+      }>();
+      if (balanceMode === 'balance') {
+        const { data: paidPayrolls, error: paidPayrollsError } = await supabase
+          .from('payrolls')
+          .select('id, version')
+          .eq('month', genMonth)
+          .eq('year', genYear)
+          .eq('status', 'paid');
+        if (paidPayrollsError) throw paidPayrollsError;
+
+        const paidVersionByPayrollId = new Map(
+          (paidPayrolls || []).map(payroll => [payroll.id, Number(payroll.version) || 1])
+        );
+        const paidPayrollIds = Array.from(paidVersionByPayrollId.keys());
+        if (paidPayrollIds.length > 0) {
+          const [{ data: paidItems, error: paidItemsError }, { data: paidAmounts, error: paidAmountsError }] = await Promise.all([
+            supabase.from('payroll_items').select('id, payroll_id, employee_id, net_salary, advance_deduction').in('payroll_id', paidPayrollIds),
+            supabase.from('payroll_paid_amounts').select('payroll_item_id, paid_amount, advance_repayment_amount').in('payroll_id', paidPayrollIds),
+          ]);
+          if (paidItemsError) throw paidItemsError;
+          if (paidAmountsError) throw paidAmountsError;
+
+          const paidAmountByItemId = new Map(
+            (paidAmounts || []).map(payment => [payment.payroll_item_id, {
+              amount: safeNumber(payment.paid_amount),
+              advanceRepayment: payment.advance_repayment_amount === null || payment.advance_repayment_amount === undefined
+                ? null
+                : safeNumber(payment.advance_repayment_amount),
+            }])
+          );
+          (paidItems || []).forEach(item => {
+            const version = paidVersionByPayrollId.get(item.payroll_id) || 1;
+            const current = previousPaidByEmployee.get(item.employee_id);
+            if (current && current.version >= version) return;
+            const paidRecord = paidAmountByItemId.get(item.id);
+            previousPaidByEmployee.set(item.employee_id, {
+              amount: paidRecord
+                ? paidRecord.amount
+                : Math.max(0, safeNumber(item.net_salary)),
+              advanceRepayment: paidRecord?.advanceRepayment ?? Math.max(0, safeNumber(item.advance_deduction)),
+              payrollId: item.payroll_id,
+              version,
+            });
+          });
+        }
+      }
+
+      const balanceAnalysisByEmployee = new Map<string, LiveBalanceAnalysisItem>();
+      if (balanceMode === 'balance' && previousPaidByEmployee.size > 0) {
+        const latestPaidPayrollIds = Array.from(new Set(
+          Array.from(previousPaidByEmployee.values()).map(paid => paid.payrollId)
+        ));
+        const latestPaidAnalyses = await Promise.all(latestPaidPayrollIds.map(async payrollId => {
+          const response = await fetch(`/api/payroll-items/analysis/${payrollId}?for_balance=true`);
+          if (!response.ok) {
+            throw new Error(`Could not load live attendance and timesheet analysis for paid payroll ${payrollId}`);
+          }
+          return {
+            payrollId,
+            items: await response.json() as LiveBalanceAnalysisItem[],
+          };
+        }));
+
+        latestPaidAnalyses.forEach(({ payrollId, items }) => {
+          items.forEach(item => {
+            const employeeId = item.employee_id || item.employee?.id;
+            if (employeeId && previousPaidByEmployee.get(employeeId)?.payrollId === payrollId) {
+              balanceAnalysisByEmployee.set(employeeId, item);
+            }
+          });
+        });
+      }
+
       const calendarDays = new Date(genYear, genMonth, 0).getDate();
 
       let totalAmount = 0;
       const items = [];
+      const balanceAdjustments: {
+        employee_id: string;
+        previous_paid_amount: number;
+        previous_paid_advance_repayment: number;
+        previous_paid_payroll_id: string | null;
+        previous_paid_version: number | null;
+        recalculated_net_salary: number;
+        balance_payable: number;
+        overpayment_amount: number;
+        created_by: string | null;
+      }[] = [];
 
       // We already created the payroll row first so we can attach items to it
       const { data: newPayroll } = await supabase
@@ -608,12 +733,14 @@ export function Payroll() {
           total_amount: 0,
           generated_at: new Date().toISOString(),
           version,
-          regeneration_reason: regenReason || null
+          regeneration_reason: regenReason || null,
+          balance_adjustment_mode: balanceMode,
         })
         .select()
         .single();
 
       if (!newPayroll) throw new Error('Failed to create payroll');
+      generatedPayrollId = newPayroll.id;
 
       for (const emp of dataToUse.employees) {
         const monthlySalary = emp.ctc / 12;
@@ -657,8 +784,9 @@ export function Payroll() {
 
         const missingTimesheets = 0;
 
-        // Pass lessThan9 as missingPunches so they are bucketed correctly in DB
-        const effectiveMissingPunches = punchMissing + lessThan9;
+        // Less-than-9-hour days are charged proportionally by the hourly
+        // deduction below, not again as a full missing-punch day.
+        const effectiveMissingPunches = punchMissing;
 
         // Daily biometric hours short of 9h/day, net of approved LMS permission / monthly 3h allowance.
         // Deducted proportionally by the hour (not as a full missing day).
@@ -694,7 +822,77 @@ export function Payroll() {
           hourlyDeductionAmount
         });
 
-        totalAmount += calc.netSalary;
+        const previousPaidVersion = previousPaidByEmployee.get(emp.id);
+        const balanceAnalysis = balanceMode === 'balance'
+          ? balanceAnalysisByEmployee.get(emp.id)
+          : null;
+        if (previousPaidVersion && !balanceAnalysis) {
+          throw new Error(`Could not load live attendance and timesheet analysis for ${emp.name}. Please retry balance payroll generation.`);
+        }
+
+        const previousPaidAmount = previousPaidVersion?.amount || 0;
+        const previousAdvanceRepayment = previousPaidVersion?.advanceRepayment || 0;
+        const previouslySettledAmount = previousPaidAmount + previousAdvanceRepayment;
+
+        const balanceMissingTimesheets = balanceAnalysis
+          ? safeNumber(balanceAnalysis.timesheet_deductible_days, safeNumber(balanceAnalysis.missing_timesheets))
+          : 0;
+        const balanceMissingPunches = balanceAnalysis
+          ? Math.max(
+              0,
+              safeNumber(balanceAnalysis.missing_punches) -
+                (Array.isArray(balanceAnalysis.missing_punch_exception_dates)
+                  ? balanceAnalysis.missing_punch_exception_dates.length
+                  : 0)
+            )
+          : effectiveMissingPunches;
+        const balanceSundayDeductions = balanceAnalysis
+          ? Math.max(sundayDeductions, safeNumber(balanceAnalysis.sandwich_deducted_days))
+          : sundayDeductions;
+        const balanceCalc = balanceAnalysis
+          ? calculatePayroll({
+              monthlySalary,
+              workingDays: effectiveWorkingDays,
+              calendarDays,
+              unpaidLeaves,
+              missingTimesheets: balanceMissingTimesheets,
+              missingPunches: balanceMissingPunches,
+              bonus: 0,
+              pfRate,
+              esiRate,
+              esiLimit,
+              taxRate,
+              loanDeduction: 0,
+              advanceDeduction,
+              sundayWorkDays: 0,
+              calculationType: isMidMonthJoiner ? 'custom' : calculationType,
+              customDays: isMidMonthJoiner
+                ? eligibleDays
+                : (calculationType === 'custom' ? parseFloat(customDaysInput) || 0 : 0),
+              sundayDeductions: balanceSundayDeductions,
+              hourlyDeductionAmount,
+            })
+          : calc;
+        const balanceRecalculatedNetSalary = balanceAnalysis
+          ? Math.max(0, Math.round((balanceCalc.netSalary - balanceCalc.sundayDeductionAmount) * 100) / 100)
+          : balanceCalc.netSalary;
+        const balancePayable = Math.max(0, Math.round((balanceRecalculatedNetSalary - previouslySettledAmount) * 100) / 100);
+        const overpaymentAmount = Math.max(0, Math.round((previouslySettledAmount - balanceRecalculatedNetSalary) * 100) / 100);
+        const netSalary = balanceMode === 'balance' ? balancePayable : calc.netSalary;
+        totalAmount += netSalary;
+        if (balanceMode === 'balance') {
+          balanceAdjustments.push({
+            employee_id: emp.id,
+            previous_paid_amount: previousPaidAmount,
+            previous_paid_advance_repayment: previousAdvanceRepayment,
+            previous_paid_payroll_id: previousPaidVersion?.payrollId || null,
+            previous_paid_version: previousPaidVersion?.version || null,
+            recalculated_net_salary: balanceRecalculatedNetSalary,
+            balance_payable: balancePayable,
+            overpayment_amount: overpaymentAmount,
+            created_by: user?.email || null,
+          });
+        }
         items.push({
           payroll_id: newPayroll.id,
           employee_id: emp.id,
@@ -702,34 +900,43 @@ export function Payroll() {
           hra: salaryBreakdown.hra,
           conveyance: salaryBreakdown.conveyance,
           medical: salaryBreakdown.medical,
-          leave_deduction: calc.leaveDeduction,
-          timesheet_deduction: calc.timesheetDeduction,
-          missing_punches: effectiveMissingPunches,
-          missing_punch_deduction: calc.missingPunchDeduction,
-          pf_deduction: calc.pfDeduction,
-          esi_deduction: calc.esiDeduction,
-          tax_deduction: calc.taxDeduction,
-          loan_deduction: calc.loanDeduction,
-          advance_deduction: calc.advanceDeduction,
+          leave_deduction: balanceAnalysis ? balanceCalc.leaveDeduction : calc.leaveDeduction,
+          timesheet_deduction: balanceAnalysis ? balanceCalc.timesheetDeduction : calc.timesheetDeduction,
+          missing_punches: balanceAnalysis ? balanceMissingPunches : effectiveMissingPunches,
+          missing_punch_deduction: balanceAnalysis ? balanceCalc.missingPunchDeduction : calc.missingPunchDeduction,
+          pf_deduction: balanceAnalysis ? balanceCalc.pfDeduction : calc.pfDeduction,
+          esi_deduction: balanceAnalysis ? balanceCalc.esiDeduction : calc.esiDeduction,
+          tax_deduction: balanceAnalysis ? balanceCalc.taxDeduction : calc.taxDeduction,
+          loan_deduction: balanceAnalysis ? balanceCalc.loanDeduction : calc.loanDeduction,
+          advance_deduction: balanceAnalysis ? balanceCalc.advanceDeduction : calc.advanceDeduction,
           sunday_work_days: 0,
-          bonus: calc.bonus,
-          net_salary: calc.netSalary,
+          bonus: balanceAnalysis ? balanceCalc.bonus : calc.bonus,
+          net_salary: netSalary,
           unpaid_leaves: unpaidLeaves,
-          missing_timesheets: missingTimesheets,
+          missing_timesheets: balanceAnalysis
+            ? safeNumber(balanceAnalysis.missing_timesheets, balanceMissingTimesheets)
+            : missingTimesheets,
           holiday_count: 0,
           pa_sla_consumed: emp.summary.paSlaConsumed || 0,
-          timesheet_excluded_dates: [],
-          holiday_dates: [],
+          timesheet_excluded_dates: balanceAnalysis ? balanceAnalysis.timesheet_excluded_dates || [] : [],
+          holiday_dates: balanceAnalysis ? balanceAnalysis.holiday_dates || [] : [],
           working_days: isMidMonthJoiner ? eligibleDays : (calculationType === 'working_days' ? effectiveWorkingDays : calendarDays),
           calculation_type: isMidMonthJoiner ? 'custom' : calculationType,
           calculation_days: isMidMonthJoiner
             ? eligibleDays
             : (calculationType === 'custom' ? parseFloat(customDaysInput) || 0 : (calculationType === 'working_days' ? effectiveWorkingDays : calendarDays)),
-          permission_hours: emp.summary.approvedPermissionHours || 0,
-          permission_deduction: calc.permissionDeduction,
+          permission_hours: balanceAnalysis ? safeNumber(balanceAnalysis.permission_hours) : emp.summary.approvedPermissionHours || 0,
+          permission_deduction: balanceAnalysis ? balanceCalc.permissionDeduction : calc.permissionDeduction,
           hourly_short_hours: emp.summary.deductibleShortfallHours || 0,
-          hourly_deduction: calc.hourlyDeductionAmount,
+          hourly_deduction: balanceAnalysis ? balanceCalc.hourlyDeductionAmount : calc.hourlyDeductionAmount,
           hourly_deduction_breakdown: hourlyDeductionBreakdown,
+          ...(balanceAnalysis ? {
+            timesheet_exception_type: balanceAnalysis.timesheet_exception_type || 'none',
+            timesheet_exception_days: safeNumber(balanceAnalysis.timesheet_exception_days),
+            timesheet_exception_note: balanceAnalysis.timesheet_exception_note || null,
+            missing_punch_exception_dates: balanceAnalysis.missing_punch_exception_dates || [],
+            missing_punch_exception_note: balanceAnalysis.missing_punch_exception_note || null,
+          } : {}),
         });
       }
 
@@ -740,6 +947,20 @@ export function Payroll() {
 
       if (insertItemError || !insertedItems) {
         throw new Error(insertItemError?.message || 'Failed to create payroll items');
+      }
+
+      if (balanceMode === 'balance') {
+        const adjustments = insertedItems.map(item => {
+          const adjustment = balanceAdjustments.find(row => row.employee_id === item.employee_id);
+          if (!adjustment) throw new Error(`Missing balance adjustment for employee ${item.employee_id}`);
+          return {
+            payroll_id: newPayroll.id,
+            payroll_item_id: item.id,
+            ...adjustment,
+          };
+        });
+        const { error: adjustmentError } = await supabase.from('payroll_balance_adjustments').insert(adjustments);
+        if (adjustmentError) throw adjustmentError;
       }
 
       await supabase.from('payrolls').update({ total_amount: totalAmount }).eq('id', newPayroll.id);
@@ -753,17 +974,25 @@ export function Payroll() {
 
       await supabase.from('payslips').insert(payslips);
 
-      await supabase.from('audit_logs').insert({
+      const { error: auditError } = await supabase.from('audit_logs').insert({
         action: 'GENERATE_PAYROLL',
         entity: 'payrolls',
         entity_id: newPayroll.id,
-        details: { month: genMonth, year: genYear, employee_count: dataToUse.employees.length, total_amount: totalAmount, version, regeneration_reason: regenReason || null },
+        details: { month: genMonth, year: genYear, employee_count: dataToUse.employees.length, total_amount: totalAmount, version, regeneration_reason: regenReason || null, balance_mode: balanceMode },
       });
+      if (auditError) console.error('Payroll generated but audit log could not be saved:', auditError);
 
-      showToast('success', `Payroll for ${getMonthName(genMonth)} ${genYear} (V${version}) generated successfully`);
+      showToast('success', `Payroll for ${getMonthName(genMonth)} ${genYear} (V${version}) generated successfully${balanceMode === 'balance' ? ' with paid-balance adjustment' : ''}`);
     } catch (err) {
       console.error(err);
-      showToast('error', 'Failed to generate payroll');
+      if (generatedPayrollId) {
+        const { error: cleanupError } = await supabase.from('payrolls').delete().eq('id', generatedPayrollId);
+        if (cleanupError) console.error('Could not remove incomplete payroll after generation failed:', cleanupError);
+      }
+      const message = err && typeof err === 'object' && 'message' in err && typeof err.message === 'string'
+        ? err.message
+        : 'Failed to generate payroll';
+      showToast('error', message);
     }
 
     setShowPreGenModal(false);
@@ -788,6 +1017,13 @@ export function Payroll() {
   async function submitRegenReasonAndGenerate() {
     if (!regenReasonInput.trim() || !pendingGenerateData) return;
     setRegenSubmitting(true);
+    const hasPaidVersion = payrolls.some(p => p.month === genMonth && p.year === genYear && p.status === 'paid');
+    if (hasPaidVersion) {
+      setRegenSubmitting(false);
+      setShowRegenReasonModal(false);
+      setShowPaidBalanceChoiceModal(true);
+      return;
+    }
     await generatePayroll(pendingGenerateData, regenReasonInput.trim());
     setRegenSubmitting(false);
     setShowRegenReasonModal(false);
@@ -795,9 +1031,63 @@ export function Payroll() {
     setRegenReasonInput('');
   }
 
+  async function submitPaidBalanceChoice(balanceMode: 'full' | 'balance') {
+    if (!pendingGenerateData || !regenReasonInput.trim()) return;
+    setRegenSubmitting(true);
+    await generatePayroll(pendingGenerateData, regenReasonInput.trim(), balanceMode);
+    setRegenSubmitting(false);
+    setShowPaidBalanceChoiceModal(false);
+    setPendingGenerateData(null);
+    setRegenReasonInput('');
+  }
+
   async function markAsPaid(payroll: PayrollType) {
     try {
-      await supabase.from('payrolls').update({ status: 'paid', paid_at: new Date().toISOString() }).eq('id', payroll.id);
+      if (payroll.balance_adjustment_mode === 'balance') {
+        const analysisResponse = await fetch(`/api/payroll-items/analysis/${payroll.id}?for_balance=true`);
+        if (!analysisResponse.ok) {
+          throw new Error('Could not verify the live paid-balance calculation. Payroll was not marked Paid.');
+        }
+        const latestItems = await analysisResponse.json() as LiveBalanceAnalysisItem[];
+        const { data: storedAdjustments, error: adjustmentsError } = await supabase
+          .from('payroll_balance_adjustments')
+          .select('payroll_item_id, recalculated_net_salary, balance_payable, overpayment_amount')
+          .eq('payroll_id', payroll.id);
+        if (adjustmentsError) throw adjustmentsError;
+
+        const adjustmentByItemId = new Map(
+          (storedAdjustments || []).map(adjustment => [adjustment.payroll_item_id, adjustment])
+        );
+        for (const item of latestItems) {
+          if (!item.paid_balance_adjustment_applied || item.paid_balance_previous_version == null) continue;
+          const stored = adjustmentByItemId.get(item.id);
+          if (!stored) {
+            throw new Error(`Missing paid-balance audit for ${item.employee_name || 'an employee'}. Payroll was not marked Paid.`);
+          }
+
+          const liveRecalculated = safeNumber(item.paid_balance_recalculated_total);
+          const liveBalance = safeNumber(item.net_salary);
+          const liveOverpayment = safeNumber(item.paid_balance_overpayment);
+          const valuesChanged =
+            Math.abs(liveRecalculated - safeNumber(stored.recalculated_net_salary)) > 0.01 ||
+            Math.abs(liveBalance - safeNumber(stored.balance_payable)) > 0.01 ||
+            Math.abs(liveOverpayment - safeNumber(stored.overpayment_amount)) > 0.01;
+          if (valuesChanged) {
+            showToast(
+              'error',
+              `Live balance for ${item.employee_name || 'an employee'} differs from the saved version. Generate a new balance version before marking this payroll Paid.`
+            );
+            return;
+          }
+        }
+      }
+
+      const { error: markPaidError } = await supabase.rpc('mark_payroll_as_paid', {
+        p_payroll_id: payroll.id,
+        p_paid_by: user?.email || null,
+      });
+      if (markPaidError) throw markPaidError;
+
       const { data: items } = await supabase
         .from('payroll_items')
         .select('employee_id, advance_deduction, pa_sla_consumed')
@@ -843,7 +1133,10 @@ export function Payroll() {
       showToast('success', `Payroll marked as paid, advance & leave balances updated`);
     } catch (err) {
       console.error('Error marking payroll as paid:', err);
-      showToast('error', 'Failed to update advance balances');
+      const message = err && typeof err === 'object' && 'message' in err && typeof err.message === 'string'
+        ? err.message
+        : 'Failed to mark payroll as paid or update related balances';
+      showToast('error', message);
     }
     await loadPayrolls();
   }
@@ -851,6 +1144,19 @@ export function Payroll() {
   async function deletePayroll(payroll: PayrollType) {
     if (payroll.is_locked) {
       showToast('error', 'This payroll is locked. Unlock it before deleting.');
+      return;
+    }
+    const { data: paidAmountRows, error: paidAmountError } = await supabase
+      .from('payroll_paid_amounts')
+      .select('id')
+      .eq('payroll_id', payroll.id)
+      .limit(1);
+    if (paidAmountError) {
+      showToast('error', `Could not verify payment history: ${paidAmountError.message}`);
+      return;
+    }
+    if (paidAmountRows && paidAmountRows.length > 0) {
+      showToast('error', 'This payroll has an audited payment record and cannot be deleted.');
       return;
     }
     const confirmed = window.confirm(`Delete payroll for ${getMonthName(payroll.month)} ${payroll.year}? This will remove associated payroll items and payslips.`);
@@ -1300,6 +1606,29 @@ export function Payroll() {
       const netSalary = getNetSalary(item, payroll.month, payroll.year);
       const deductionLines = getEmployeeDeductionLines(item, payroll);
       const totalDeductions = deductionLines.reduce((sum, line) => sum + line.amount, 0);
+      const balanceAdjustmentRows = item.paid_balance_adjustment_applied
+        ? [
+          ['Recalculated salary', 'Before subtracting prior payments', 'Latest payroll calculation', formatReportAmount(safeNumber(item.paid_balance_recalculated_total))],
+          [
+            `Already paid${item.paid_balance_previous_version ? ` (V${item.paid_balance_previous_version})` : ''}`,
+            'Latest previous Paid version',
+            'Deducted once from this recalculation',
+            `-${formatReportAmount(safeNumber(item.paid_balance_previous_amount))}`,
+          ],
+          ...(safeNumber(item.paid_balance_previous_advance_repayment) > 0
+            ? [[
+              `Advance repayment${item.paid_balance_previous_version ? ` (V${item.paid_balance_previous_version})` : ''}`,
+              'Already settled by prior payroll',
+              'Counted toward salary already processed',
+              `-${formatReportAmount(safeNumber(item.paid_balance_previous_advance_repayment))}`,
+            ]]
+            : []),
+          ...(safeNumber(item.paid_balance_overpayment) > 0
+            ? [['Overpayment adjustment', 'Prior paid exceeds recalculated salary', 'No additional payment is due', formatReportAmount(safeNumber(item.paid_balance_overpayment))]]
+            : []),
+          ['Balance payable', 'Current payroll version', 'Amount payable after prior payments', formatReportAmount(netSalary)],
+        ]
+        : [];
       const calendarDays = new Date(payroll.year, payroll.month, 0).getDate();
       const calculationDays = safeNumber(item.calculation_days) || safeNumber(item.working_days) || calendarDays;
       const attendanceDates = item.attendance_dates || [];
@@ -1427,6 +1756,12 @@ export function Payroll() {
           reportColumns,
           ...(otherDeductionLines.length ? reportRows(otherDeductionLines) : [['—', 'No other deductions', 'No other deductions recorded', '—']]),
         ]);
+        if (balanceAdjustmentRows.length > 0) {
+          addSection('Paid Balance Adjustment', [
+            ['Component', 'Details', 'Calculation', 'Amount (INR)'],
+            ...balanceAdjustmentRows,
+          ]);
+        }
         addSection('Payroll Summary', [
           ['Summary', 'Amount (INR)', '', ''],
           ['Gross payable before deductions', formatReportAmount(grossPayable), '', ''],
@@ -1497,6 +1832,9 @@ export function Payroll() {
           '—', 'No missing-punch deduction', missingPunchDates.length ? `${missingPunchDates.length} missing date(s), excepted or no deduction recorded` : 'No missing punch dates recorded', '—',
         ]]);
         addPdfSection('Other Deductions', reportRows(otherDeductionLines));
+        if (balanceAdjustmentRows.length > 0) {
+          addPdfSection('Paid Balance Adjustment', balanceAdjustmentRows);
+        }
         addPdfSection('Payroll Summary', [
           ['Gross payable before deductions', 'Generated payroll amount', 'Gross salary and earnings', formatReportAmount(grossPayable)],
           ['Total deductions', 'As itemized above', 'Generated payroll deductions', formatReportAmount(totalDeductions)],
@@ -1609,6 +1947,11 @@ export function Payroll() {
                           >
                             V{payroll.version || 1}
                           </span>
+                          {payroll.balance_adjustment_mode === 'balance' && (
+                            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                              Balance
+                            </span>
+                          )}
                           {payroll.is_locked && (
                             <span
                               className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
@@ -1827,6 +2170,27 @@ export function Payroll() {
                       <td className="py-2 px-3 text-green-500 font-medium">+{item.sunday_work_days || 0} days</td>
                       <td className="py-2 px-3 font-semibold text-slate-800 dark:text-white">
                         {formatCurrency(item.net_salary)}
+                        {item.paid_balance_adjustment_applied && (
+                          <div className="mt-1 text-[10px] font-normal text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                            <div>Recalculated: {formatCurrency(safeNumber(item.paid_balance_recalculated_total))}</div>
+                            <div>
+                              Already paid{item.paid_balance_previous_version ? ` (V${item.paid_balance_previous_version})` : ''}: -{formatCurrency(safeNumber(item.paid_balance_previous_amount))}
+                            </div>
+                            {safeNumber(item.paid_balance_previous_advance_repayment) > 0 && (
+                              <div>
+                                Advance repayment already settled: -{formatCurrency(safeNumber(item.paid_balance_previous_advance_repayment))}
+                              </div>
+                            )}
+                            {safeNumber(item.paid_balance_overpayment) > 0 && (
+                              <div className="text-amber-600 dark:text-amber-400">
+                                Overpayment adjustment: {formatCurrency(safeNumber(item.paid_balance_overpayment))}
+                              </div>
+                            )}
+                            <div className="font-semibold text-emerald-700 dark:text-emerald-400">
+                              Balance payable: {formatCurrency(item.net_salary)}
+                            </div>
+                          </div>
+                        )}
                         {(item as any).previous_month_balance > 0 && (
                           <div className="text-[10px] font-normal text-blue-600 dark:text-blue-400 mt-0.5">
                             incl. +{formatCurrency((item as any).previous_month_balance)} prev. month balance
@@ -1998,6 +2362,49 @@ export function Payroll() {
           placeholder="e.g. Corrected attendance data after payroll was first generated"
           className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
+      </Modal>
+
+      <Modal
+        isOpen={showPaidBalanceChoiceModal}
+        onClose={() => {
+          if (!regenSubmitting) {
+            setShowPaidBalanceChoiceModal(false);
+            setPendingGenerateData(null);
+            setRegenReasonInput('');
+          }
+        }}
+        title="Choose payroll version amount"
+        subtitle={`${getMonthName(genMonth)} ${genYear} has a Paid version`}
+        size="md"
+      >
+        <p className="text-sm text-slate-600 dark:text-slate-300 mb-4">
+          Recalculate using the latest attendance, timesheet, punch, leave, OD, and deduction data. Choose whether to subtract amounts from earlier Paid versions.
+        </p>
+        <div className="grid gap-3">
+          <button
+            type="button"
+            onClick={() => submitPaidBalanceChoice('full')}
+            disabled={regenSubmitting}
+            className="text-left p-4 rounded-lg border border-slate-200 dark:border-slate-600 hover:border-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 disabled:opacity-50"
+          >
+            <span className="block font-semibold text-slate-800 dark:text-white">Generate Full Payroll</span>
+            <span className="block mt-1 text-xs text-slate-500 dark:text-slate-400">
+              Generate the full recalculated salary without subtracting previous payments.
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => submitPaidBalanceChoice('balance')}
+            disabled={regenSubmitting}
+            className="text-left p-4 rounded-lg border border-emerald-200 dark:border-emerald-800 hover:border-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 disabled:opacity-50"
+          >
+            <span className="block font-semibold text-emerald-800 dark:text-emerald-300">Generate Only Balance</span>
+            <span className="block mt-1 text-xs text-slate-500 dark:text-slate-400">
+              Subtract the amount in each employee’s latest previous Paid version only. A zero balance stays at ₹0; prior overpayments are shown as adjustments.
+            </span>
+          </button>
+        </div>
+        {regenSubmitting && <p className="mt-3 text-xs text-slate-500">Generating payroll...</p>}
       </Modal>
 
       {pastAnalysisPayroll && (
@@ -2626,7 +3033,30 @@ function PayrollBreakdown({ items, loading, onEdit, onDownloadEmployee, month, y
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 text-blue-600 dark:text-blue-400">
                       {(item as any).previous_month_balance > 0 ? `+${formatCurrency((item as any).previous_month_balance)}` : '—'}
                     </td>
-                    <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 font-bold text-slate-800 dark:text-white">{formatCurrency(getNetSalary(item, month, year))}</td>
+                    <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800 font-bold text-slate-800 dark:text-white">
+                      {formatCurrency(getNetSalary(item, month, year))}
+                      {item.paid_balance_adjustment_applied && (
+                        <div className="mt-1 text-[10px] font-normal text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                          <div>Recalculated: {formatCurrency(safeNumber(item.paid_balance_recalculated_total))}</div>
+                          <div>
+                            Already paid{item.paid_balance_previous_version ? ` (V${item.paid_balance_previous_version})` : ''}: -{formatCurrency(safeNumber(item.paid_balance_previous_amount))}
+                          </div>
+                          {safeNumber(item.paid_balance_previous_advance_repayment) > 0 && (
+                            <div>
+                              Advance repayment already settled: -{formatCurrency(safeNumber(item.paid_balance_previous_advance_repayment))}
+                            </div>
+                          )}
+                          {safeNumber(item.paid_balance_overpayment) > 0 && (
+                            <div className="text-amber-600 dark:text-amber-400">
+                              Overpayment adjustment: {formatCurrency(safeNumber(item.paid_balance_overpayment))}
+                            </div>
+                          )}
+                          <div className="font-semibold text-emerald-700 dark:text-emerald-400">
+                            Balance payable: {formatCurrency(getNetSalary(item, month, year))}
+                          </div>
+                        </div>
+                      )}
+                    </td>
                     <td className="py-2 px-3 border-r border-b border-slate-100 dark:border-slate-800">
                       {(item as any).payslip_status === 'held' ? (
                         <div className="flex flex-col gap-1">

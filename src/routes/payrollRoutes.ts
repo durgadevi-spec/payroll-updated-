@@ -4,7 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 import * as dotenv from 'dotenv';
 import ZKLib from 'node-zklib';
 import { sendEmail } from './emailRoutes';
-import { calculatePayroll } from '../lib/payrollCalculator';
+import { calculateHourlyExcessDeduction, calculatePayroll } from '../lib/payrollCalculator';
 
 dotenv.config({ path: './.env' });
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -308,6 +308,45 @@ async function isPayrollItemLocked(client: any, payrollItemId: string): Promise<
 }
 
 const PAYROLL_LOCKED_MESSAGE = 'This payroll is locked. Unlock it before making changes.';
+
+async function applyPaidBalanceAdjustment(
+  client: { query: (sql: string, values?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  payrollItemId: string,
+  recalculatedNetSalary: number
+) {
+  const adjustmentResult = await client.query(
+    `SELECT pba.previous_paid_amount,
+            pba.previous_paid_advance_repayment,
+            prior.advance_deduction AS prior_advance_deduction
+       FROM payroll_balance_adjustments pba
+       LEFT JOIN payroll_items prior
+         ON prior.payroll_id = pba.previous_paid_payroll_id
+        AND prior.employee_id = pba.employee_id
+      WHERE pba.payroll_item_id = $1`,
+    [payrollItemId]
+  );
+  if (adjustmentResult.rows.length === 0) return recalculatedNetSalary;
+
+  const recalculated = Math.max(0, Math.round(recalculatedNetSalary * 100) / 100);
+  const previousPaidAmount = Number(adjustmentResult.rows[0].previous_paid_amount) || 0;
+  const previousAdvanceRepayment = adjustmentResult.rows[0].previous_paid_advance_repayment === null
+    ? Number(adjustmentResult.rows[0].prior_advance_deduction) || 0
+    : Number(adjustmentResult.rows[0].previous_paid_advance_repayment) || 0;
+  const previouslySettledAmount = previousPaidAmount + previousAdvanceRepayment;
+  const balancePayable = Math.max(0, Math.round((recalculated - previouslySettledAmount) * 100) / 100);
+  const overpaymentAmount = Math.max(0, Math.round((previouslySettledAmount - recalculated) * 100) / 100);
+
+  await client.query(
+    `UPDATE payroll_balance_adjustments
+        SET recalculated_net_salary = $1,
+            balance_payable = $2,
+            overpayment_amount = $3,
+            previous_paid_advance_repayment = $4
+      WHERE payroll_item_id = $5`,
+    [recalculated, balancePayable, overpaymentAmount, previousAdvanceRepayment, payrollItemId]
+  );
+  return balancePayable;
+}
 
 async function writeLockAuditLog(action: string, payrollId: string, details: Record<string, unknown>, userEmail?: string | null) {
   try {
@@ -690,8 +729,12 @@ router.get('/payroll-processing', async (req, res) => {
         const lessThan9 = summary.lessThan9 || 0;
         const nonLeaveDeductions = punchMissing + sundayDeductions + lessThan9;
         const unpaidLeaves = Math.max(0, totalUnpaid - nonLeaveDeductions);
-        const effectiveMissingPunches = punchMissing + lessThan9;
+        const effectiveMissingPunches = punchMissing;
         const advanceDeduction = advanceByEmp.get(emp.id) || 0;
+        const hourlyDeductionAmount = calculateHourlyExcessDeduction(
+          summary.deductibleShortfallHours || 0,
+          monthlySalary / calendarDays
+        ).totalDeduction;
 
         const calc = calculatePayroll({
           monthlySalary,
@@ -708,6 +751,7 @@ router.get('/payroll-processing', async (req, res) => {
           loanDeduction: 0,
           advanceDeduction,
           sundayDeductions,
+          hourlyDeductionAmount,
           calculationType: isMidMonthJoiner ? 'custom' : 'monthly',
           customDays: isMidMonthJoiner ? eligibleDays : 0
         });
@@ -2635,9 +2679,9 @@ router.get('/attendance/leaves', async (req, res) => {
 // live calculation once, at lock time, to capture the snapshot.
 const payrollAnalysisHandler = async (req: any, res: any) => {
   const { payrollId } = req.params;
-  // Only the lock route sets this: it needs the LIVE figures to snapshot, even though the
-  // payroll is not locked yet. Normal requests never can.
-  const forceLive = req.__forceLive === true;
+  // Balance generation may explicitly request current data from a locked paid version;
+  // the source payroll remains read-only and its normal views still use the frozen snapshot.
+  const forceLive = req.__forceLive === true || req.query?.for_balance === 'true';
 
   // Explicitly typed (rather than inferred) because these are now read inside the nested
   // async closure passed to Promise.all/.map() below — TS can't narrow an inferred-any
@@ -2726,9 +2770,18 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
       `SELECT pi.*, e.id AS employee_id, e.name AS employee_name, e.email AS employee_email, e.designation AS employee_designation, e.department AS employee_department, e.bank_account AS employee_bank_account, e.pf_number AS employee_pf_number, e.uan_number AS employee_uan_number
        , e.employee_code AS employee_code, e.ctc AS employee_ctc, e.use_pa_sla AS employee_use_pa_sla, e.pa_sla_balance AS employee_pa_sla_balance, e.joining_date AS employee_joining_date, e.relieving_date AS employee_relieving_date
        , ps.status AS payslip_status, ps.hold_reason AS payslip_hold_reason
+       , pba.previous_paid_amount AS paid_balance_previous_amount
+       , COALESCE(pba.previous_paid_advance_repayment, prior_paid_item.advance_deduction, 0) AS paid_balance_previous_advance_repayment
+       , pba.previous_paid_version AS paid_balance_previous_version
+       , pba.recalculated_net_salary AS paid_balance_recalculated_total
+       , pba.overpayment_amount AS paid_balance_overpayment
        FROM payroll_items pi
        JOIN employees e ON e.id = pi.employee_id
        LEFT JOIN payslips ps ON ps.payroll_item_id = pi.id
+       LEFT JOIN payroll_balance_adjustments pba ON pba.payroll_item_id = pi.id
+       LEFT JOIN payroll_items prior_paid_item
+         ON prior_paid_item.payroll_id = pba.previous_paid_payroll_id
+        AND prior_paid_item.employee_id = pi.employee_id
        WHERE pi.payroll_id = $1`,
       [payrollId]
     );
@@ -3341,6 +3394,18 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
         Math.round((baseSalaryForPay - leaveDeduction - timesheetDeduction - missingPunchDeduction - sandwichDeductionAmount - permissionDeduction - hourlyDeductionStored - pfDeduction - esiDeduction - taxDeduction - loanDeduction - advanceDeduction + bonus + previousMonthBalance + sundayEarnings) * 100) / 100
       );
 
+      const previousPaidAmount = item.paid_balance_previous_amount === null || item.paid_balance_previous_amount === undefined
+        ? null
+        : Number(item.paid_balance_previous_amount) || 0;
+      const previousAdvanceRepayment = Number(item.paid_balance_previous_advance_repayment) || 0;
+      const balanceAdjustmentApplied = previousPaidAmount !== null;
+      const balancePayable = balanceAdjustmentApplied
+        ? Math.max(0, Math.round((netSalary - previousPaidAmount - previousAdvanceRepayment) * 100) / 100)
+        : netSalary;
+      const overpaymentAmount = balanceAdjustmentApplied
+        ? Math.max(0, Math.round((previousPaidAmount + previousAdvanceRepayment - netSalary) * 100) / 100)
+        : 0;
+
       return {
         ...item,
         employee: {
@@ -3403,7 +3468,15 @@ const payrollAnalysisHandler = async (req: any, res: any) => {
         hourly_short_hours: Number(item.hourly_short_hours) || 0,
         hourly_deduction: Number(item.hourly_deduction) || 0,
         previous_month_balance: previousMonthBalance,
-        net_salary: netSalary,
+        paid_balance_adjustment_applied: balanceAdjustmentApplied,
+        paid_balance_previous_amount: previousPaidAmount,
+        paid_balance_previous_advance_repayment: previousAdvanceRepayment,
+        paid_balance_previous_version: item.paid_balance_previous_version === null || item.paid_balance_previous_version === undefined
+          ? null
+          : Number(item.paid_balance_previous_version),
+        paid_balance_recalculated_total: balanceAdjustmentApplied ? netSalary : null,
+        paid_balance_overpayment: overpaymentAmount,
+        net_salary: balancePayable,
         timesheet_status: !tsData?.submitted_at
           ? 'Not submitted'
           : (timesheetApprovalRequired && unapprovedMissingDates.length > 0
@@ -3616,6 +3689,7 @@ router.patch('/payroll-items/:id', async (req, res) => {
 
     const totalDeductions = finalLeaveDeduction + tsDeduction + mpDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + storedAdvance + newPermissionDeduction + newHourlyDeduction;
     const netSalary = Math.max(0, Math.round((baseSalaryForPay - totalDeductions + newBonus + newPreviousMonthBalance + sundayEarnings) * 100) / 100);
+    const payableNetSalary = await applyPaidBalanceAdjustment(client, id, netSalary);
 
     const updateRes = await client.query(
       `UPDATE payroll_items SET 
@@ -3640,7 +3714,7 @@ router.patch('/payroll-items/:id', async (req, res) => {
       [
         newSundayWork,
         newBonus,
-        netSalary,
+        payableNetSalary,
         newUnpaidLeaves,
         finalLeaveDeduction,
         newMissingTimesheets,
@@ -3766,6 +3840,7 @@ router.patch('/payroll-items/:id/timesheet-exception', async (req, res) => {
 
     const totalDeductions = leaveDeduction + newTsDeduction + missingPunchDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + advanceDeduction + permissionDeduction + hourlyDeduction;
     const netSalary = Math.max(0, Math.round((baseSalaryForPay - totalDeductions + bonus + previousMonthBalance + sundayEarnings) * 100) / 100);
+    const payableNetSalary = await applyPaidBalanceAdjustment(client, id, netSalary);
 
     const noteValue = typeof note === 'string' && note.trim() ? note.trim() : null;
 
@@ -3779,7 +3854,7 @@ router.patch('/payroll-items/:id/timesheet-exception', async (req, res) => {
         missing_timesheets = $5,
         net_salary = $6
        WHERE id = $7 RETURNING *`,
-      [type, exceptionDaysApplied, noteValue, newTsDeduction, missingDays, netSalary, id]
+      [type, exceptionDaysApplied, noteValue, newTsDeduction, missingDays, payableNetSalary, id]
     );
 
     await client.query(
@@ -3899,6 +3974,7 @@ router.patch('/payroll-items/:id/missing-punch-exception', async (req, res) => {
 
     const totalDeductions = leaveDeduction + tsDeduction + newMpDeduction + pfDeduction + esiDeduction + taxDeduction + loanDeduction + advanceDeduction + permissionDeduction + hourlyDeduction;
     const netSalary = Math.max(0, Math.round((baseSalaryForPay - totalDeductions + bonus + previousMonthBalance + sundayEarnings) * 100) / 100);
+    const payableNetSalary = await applyPaidBalanceAdjustment(client, id, netSalary);
 
     const noteValue = typeof note === 'string' && note.trim() ? note.trim() : null;
 
@@ -3911,7 +3987,7 @@ router.patch('/payroll-items/:id/missing-punch-exception', async (req, res) => {
         timesheet_deduction = $5,
         net_salary = $6
        WHERE id = $7 RETURNING *`,
-      [JSON.stringify(validExceptedDates), noteValue, validExceptedDates.length, newMpDeduction, tsDeduction, netSalary, id]
+      [JSON.stringify(validExceptedDates), noteValue, validExceptedDates.length, newMpDeduction, tsDeduction, payableNetSalary, id]
     );
 
     await client.query(
