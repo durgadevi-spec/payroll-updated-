@@ -4,6 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 import * as dotenv from 'dotenv';
 import ZKLib from 'node-zklib';
 import { sendEmail } from './emailRoutes';
+import { notifyAdvanceRaised, notifyAdvanceDecision } from '../lib/advanceEmails';
 import { calculateHourlyExcessDeduction, calculatePayroll } from '../lib/payrollCalculator';
 
 dotenv.config({ path: './.env' });
@@ -497,7 +498,10 @@ router.get('/payroll-processing', async (req, res) => {
 
     const advancesRes = await pClient.query(
       `SELECT employee_id, installment_amount, balance, status, repayment_type
-       FROM advances WHERE status = 'Active' AND balance > 0`
+       FROM advances
+       WHERE status = 'Active' AND balance > 0
+         AND (deduction_start_month IS NULL OR deduction_start_month <= make_date($1::int, $2::int, 1))`,
+      [Number(year), Number(month)]
     );
     const advanceByEmp = new Map<string, number>();
     advancesRes.rows.forEach((adv: any) => {
@@ -4242,6 +4246,12 @@ router.get('/daily-analysis', async (req, res) => {
   }
 });
 
+// 'YYYY-MM' (or 'YYYY-MM-DD') -> 'YYYY-MM-01'; anything else -> null (= start with the next payroll)
+function normalizeDeductionStartMonth(value: any): string | null {
+  const m = /^(\d{4})-(\d{2})/.exec(String(value || ''));
+  return m ? `${m[1]}-${m[2]}-01` : null;
+}
+
 router.get('/advances', async (_req, res) => {
   let client;
   try {
@@ -4254,6 +4264,7 @@ router.get('/advances', async (_req, res) => {
              a.shortfall_reference, a.shortfall_notes, a.carried_forward_to, a.closed_at, a.closed_by,
              a.payment_mode, a.payment_reference, a.attachment_filename,
              (a.attachment_data IS NOT NULL) AS has_attachment,
+             TO_CHAR(a.deduction_start_month, 'YYYY-MM-DD') AS deduction_start_month,
              a.created_at, a.updated_at,
              CASE
                WHEN COALESCE(a.settlement_type, 'Payroll') = 'Reconciliation' OR a.shortfall_action IS NOT NULL THEN a.balance
@@ -4752,7 +4763,8 @@ router.post('/advances/:id/manual-close', async (req, res) => {
 router.post('/advances', async (req, res) => {
   const {
     employee_id, amount, date, reason, repayment_type, installment_amount, remarks,
-    expense_category, settlement_type, payment_mode, payment_reference, attachment_filename, attachment_data
+    expense_category, settlement_type, payment_mode, payment_reference, attachment_filename, attachment_data,
+    deduction_start_month
   } = req.body;
 
   // Direct admin entries represent an advance that has already been paid out,
@@ -4771,10 +4783,10 @@ router.post('/advances', async (req, res) => {
       INSERT INTO advances (
         employee_id, amount, date, reason, repayment_type, installment_amount, balance, remarks, status,
         expense_category, settlement_type, payment_mode, payment_reference, attachment_filename, attachment_data,
-        disbursed_at
+        disbursed_at, deduction_start_month
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Active', $9, $10, $11, $12, $13, $14, NOW())
-      RETURNING id, employee_id, amount, date, reason, repayment_type, installment_amount, balance, remarks,
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Active', $9, $10, $11, $12, $13, $14, NOW(), $15)
+      RETURNING TO_CHAR(deduction_start_month, 'YYYY-MM-DD') AS deduction_start_month, id, employee_id, amount, date, reason, repayment_type, installment_amount, balance, remarks,
                 status, expense_category, settlement_type, payment_mode, payment_reference, attachment_filename,
                 (attachment_data IS NOT NULL) AS has_attachment, disbursed_at, created_at, updated_at
     `, [
@@ -4791,7 +4803,8 @@ router.post('/advances', async (req, res) => {
       payment_mode,
       payment_reference || null,
       attachment_filename || null,
-      attachment_data
+      attachment_data,
+      normalizeDeductionStartMonth(deduction_start_month)
     ]);
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -4806,8 +4819,10 @@ router.put('/advances/:id', async (req, res) => {
   const { id } = req.params;
   const {
     amount, date, reason, repayment_type, installment_amount, remarks,
-    expense_category, settlement_type, payment_mode, payment_reference, attachment_filename, attachment_data
+    expense_category, settlement_type, payment_mode, payment_reference, attachment_filename, attachment_data,
+    deduction_start_month
   } = req.body;
+  const startMonthProvided = deduction_start_month !== undefined;
   let client;
   try {
     client = await payrollPool.connect();
@@ -4836,9 +4851,10 @@ router.put('/advances/:id', async (req, res) => {
       SET amount = $1, date = $2, reason = $3, repayment_type = $4, installment_amount = $5, balance = $6, remarks = $7,
           expense_category = COALESCE($8, expense_category), settlement_type = COALESCE($9, settlement_type),
           payment_mode = COALESCE($10, payment_mode),
-          payment_reference = COALESCE($11, payment_reference), attachment_filename = $12, attachment_data = $13
+          payment_reference = COALESCE($11, payment_reference), attachment_filename = $12, attachment_data = $13,
+          deduction_start_month = CASE WHEN $15::boolean THEN $16::date ELSE deduction_start_month END
       WHERE id = $14
-      RETURNING id, employee_id, amount, date, reason, repayment_type, installment_amount, balance, remarks,
+      RETURNING TO_CHAR(deduction_start_month, 'YYYY-MM-DD') AS deduction_start_month, id, employee_id, amount, date, reason, repayment_type, installment_amount, balance, remarks,
                 status, expense_category, settlement_type, payment_mode, payment_reference, attachment_filename,
                 (attachment_data IS NOT NULL) AS has_attachment, disbursed_at, created_at, updated_at
     `, [
@@ -4855,7 +4871,9 @@ router.put('/advances/:id', async (req, res) => {
       payment_reference !== undefined ? payment_reference : null,
       newAttachmentFilename,
       newAttachmentData,
-      id
+      id,
+      startMonthProvided,
+      normalizeDeductionStartMonth(deduction_start_month)
     ]);
     res.json(result.rows[0]);
   } catch (err) {
@@ -4891,7 +4909,7 @@ router.delete('/advances/:id', async (req, res) => {
 
 // Employee raises a new advance request
 router.post('/advances/request', async (req, res) => {
-  const { employee_id, amount, date, reason, advance_type, repayment_type, no_of_installments, remarks } = req.body;
+  const { employee_id, amount, date, reason, advance_type, repayment_type, no_of_installments, remarks, deduction_start_month } = req.body;
   if (!employee_id || !amount) {
     return res.status(400).json({ error: 'Employee and amount are required' });
   }
@@ -4905,9 +4923,9 @@ router.post('/advances/request', async (req, res) => {
     const result = await client.query(`
       INSERT INTO advances (
         employee_id, amount, date, reason, repayment_type, installment_amount, balance, remarks,
-        status, request_source, advance_type, no_of_installments
+        status, request_source, advance_type, no_of_installments, deduction_start_month
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Pending Approval', 'Employee Request', $9, $10)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Pending Approval', 'Employee Request', $9, $10, $11)
       RETURNING *
     `, [
       employee_id,
@@ -4919,7 +4937,8 @@ router.post('/advances/request', async (req, res) => {
       parsedAmount,
       remarks,
       advance_type || 'Salary Advance',
-      installments
+      installments,
+      normalizeDeductionStartMonth(deduction_start_month)
     ]);
 
     const advance = result.rows[0];
@@ -4929,6 +4948,7 @@ router.post('/advances/request', async (req, res) => {
     );
 
     res.status(201).json(advance);
+    await notifyAdvanceRaised(client, advance.id); // response already sent; connection is released in finally
   } catch (err) {
     console.error('Error raising advance request:', err);
     res.status(500).json({ error: 'Failed to raise advance request' });
@@ -4942,7 +4962,8 @@ router.post('/advances/:id/approve', async (req, res) => {
   const { id } = req.params;
   const {
     approved_by, installment_amount,
-    expense_category, settlement_type, payment_mode, payment_reference, attachment_filename, attachment_data
+    expense_category, settlement_type, payment_mode, payment_reference, attachment_filename, attachment_data,
+    deduction_start_month
   } = req.body;
 
   // Approving a request is the actual disbursement moment for employee-raised
@@ -4980,9 +5001,10 @@ router.post('/advances/:id/approve', async (req, res) => {
           payment_mode = $5,
           payment_reference = $6,
           attachment_filename = $7,
-          attachment_data = $8
+          attachment_data = $8,
+          deduction_start_month = $10
       WHERE id = $9
-      RETURNING id, employee_id, amount, date, reason, repayment_type, installment_amount, balance, remarks,
+      RETURNING TO_CHAR(deduction_start_month, 'YYYY-MM-DD') AS deduction_start_month, id, employee_id, amount, date, reason, repayment_type, installment_amount, balance, remarks,
                 status, expense_category, settlement_type, payment_mode, payment_reference, attachment_filename,
                 (attachment_data IS NOT NULL) AS has_attachment, approved_by, approved_at, disbursed_at
     `, [
@@ -4994,7 +5016,8 @@ router.post('/advances/:id/approve', async (req, res) => {
       payment_reference || null,
       attachment_filename || null,
       attachment_data,
-      id
+      id,
+      normalizeDeductionStartMonth(deduction_start_month)
     ]);
 
     await client.query(
@@ -5003,6 +5026,7 @@ router.post('/advances/:id/approve', async (req, res) => {
     );
 
     res.json(result.rows[0]);
+    await notifyAdvanceDecision(client, id, 'approved'); // response already sent; connection is released in finally
   } catch (err) {
     console.error('Error approving advance request:', err);
     res.status(500).json({ error: 'Failed to approve advance request' });
@@ -5039,6 +5063,7 @@ router.post('/advances/:id/reject', async (req, res) => {
     );
 
     res.json(result.rows[0]);
+    await notifyAdvanceDecision(client, id, 'rejected'); // response already sent; connection is released in finally
   } catch (err) {
     console.error('Error rejecting advance request:', err);
     res.status(500).json({ error: 'Failed to reject advance request' });

@@ -75,6 +75,7 @@ export function AdvanceManagement() {
     reason: '',
     repayment_type: 'Monthly',
     installment_amount: '',
+    deduction_start_month: '',
     remarks: '',
     expense_category: 'Salary',
     settlement_type: 'Payroll',
@@ -97,11 +98,13 @@ export function AdvanceManagement() {
     reason: '',
     repayment_type: 'Monthly',
     no_of_installments: '1',
+    deduction_start_month: '',
     remarks: ''
   });
 
   const [approvingAdv, setApprovingAdv] = useState<any | null>(null);
   const [approveInstallment, setApproveInstallment] = useState('');
+  const [approveStartMonth, setApproveStartMonth] = useState('');
   const [approveSubmitting, setApproveSubmitting] = useState(false);
   const [approveExpenseCategory, setApproveExpenseCategory] = useState('Salary');
   const [approveSettlementType, setApproveSettlementType] = useState('Payroll');
@@ -309,7 +312,7 @@ export function AdvanceManagement() {
   function resetAddForm() {
     setFormData({
       employee_id: '', amount: '', date: format(new Date(), 'yyyy-MM-dd'), reason: '',
-      repayment_type: 'Monthly', installment_amount: '', remarks: '',
+      repayment_type: 'Monthly', installment_amount: '', deduction_start_month: '', remarks: '',
       expense_category: 'Salary', settlement_type: 'Payroll', payment_mode: '', payment_reference: '', attachment_filename: '', attachment_data: ''
     });
     setAttachmentError('');
@@ -372,6 +375,7 @@ export function AdvanceManagement() {
       reason: adv.reason || '',
       repayment_type: adv.repayment_type || 'Monthly',
       installment_amount: adv.installment_amount || '',
+      deduction_start_month: adv.deduction_start_month ? String(adv.deduction_start_month).slice(0, 7) : '',
       remarks: adv.remarks || '',
       expense_category: adv.expense_category || 'Salary',
       settlement_type: adv.settlement_type || defaultSettlementFor(adv.expense_category || 'Salary'),
@@ -403,6 +407,7 @@ export function AdvanceManagement() {
       reason: '',
       repayment_type: 'Monthly',
       no_of_installments: '1',
+      deduction_start_month: '',
       remarks: ''
     });
   }
@@ -441,6 +446,7 @@ export function AdvanceManagement() {
   function openApproveModal(adv: any) {
     setApprovingAdv(adv);
     setApproveInstallment(String(adv.installment_amount || ''));
+    setApproveStartMonth(adv.deduction_start_month ? String(adv.deduction_start_month).slice(0, 7) : '');
     const cat = adv.expense_category || (adv.advance_type === 'Travel' || adv.advance_type === 'Other' ? 'Admin' : 'Salary');
     setApproveExpenseCategory(cat);
     setApproveSettlementType(adv.settlement_type || defaultSettlementFor(cat));
@@ -479,6 +485,7 @@ export function AdvanceManagement() {
         body: JSON.stringify({
           approved_by: currentUserEmail,
           installment_amount: approveInstallment,
+          deduction_start_month: approveSettlementType === 'Payroll' ? approveStartMonth : '',
           expense_category: approveExpenseCategory,
           settlement_type: approveSettlementType,
           payment_mode: approvePaymentMode,
@@ -533,10 +540,13 @@ export function AdvanceManagement() {
     const recovered = Number(adv.amount) - Number(adv.balance);
     const perInstallment = Number(adv.installment_amount) || (Number(adv.amount) / n);
     const startDate = adv.disbursed_at ? new Date(adv.disbursed_at) : new Date(adv.date);
+    // If a "start deduction from" month was chosen, the first installment falls in that month;
+    // otherwise it falls one month after disbursement (old behaviour).
+    const customStart = adv.deduction_start_month ? new Date(`${String(adv.deduction_start_month).slice(0, 7)}-01T00:00:00`) : null;
     let cumulative = 0;
     return Array.from({ length: n }).map((_, i) => {
       cumulative += perInstallment;
-      const due = addMonths(startDate, i + 1);
+      const due = customStart ? addMonths(customStart, i) : addMonths(startDate, i + 1);
       return {
         index: i + 1,
         dueDate: due,
@@ -888,6 +898,9 @@ export function AdvanceManagement() {
                   <td className="px-6 py-4">
                     <div className="text-slate-900 dark:text-white">{adv.repayment_type}</div>
                     <div className="text-xs text-slate-500">₹{Number(adv.installment_amount).toLocaleString()} / mo</div>
+                    {adv.deduction_start_month && adv.settlement_type !== 'Reconciliation' && (
+                      <div className="text-[11px] text-amber-600 dark:text-amber-400">Starts {format(new Date(`${String(adv.deduction_start_month).slice(0, 7)}-01T00:00:00`), 'MMM yyyy')}</div>
+                    )}
                   </td>
                   <td className="px-6 py-4">
                     {adv.request_source === 'Employee Request' ? (
@@ -1149,6 +1162,21 @@ export function AdvanceManagement() {
                         placeholder="₹ per month"
                       />
                     </div>
+                    <div className="space-y-1.5 col-span-2">
+                      <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Start Deduction From (month)</label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="month"
+                          value={formData.deduction_start_month}
+                          onChange={e => setFormData({ ...formData, deduction_start_month: e.target.value })}
+                          className="w-full px-3 py-2 border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-blue-500"
+                        />
+                        {formData.deduction_start_month && (
+                          <button type="button" onClick={() => setFormData({ ...formData, deduction_start_month: '' })} className="text-xs text-slate-500 hover:text-slate-700 whitespace-nowrap">Clear</button>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-400">Leave empty to deduct from the very next payroll. E.g. advance given in October, pick January to start recovering from the January salary.</p>
+                    </div>
                   </>
                 )}
                 <div className="space-y-1.5">
@@ -1340,6 +1368,21 @@ export function AdvanceManagement() {
                   </div>
                 )}
                 <div className="col-span-2 space-y-1.5">
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Start Deduction From (month)</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="month"
+                      value={requestForm.deduction_start_month}
+                      onChange={e => setRequestForm({ ...requestForm, deduction_start_month: e.target.value })}
+                      className="w-full px-3 py-2 border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-blue-500"
+                    />
+                    {requestForm.deduction_start_month && (
+                      <button type="button" onClick={() => setRequestForm({ ...requestForm, deduction_start_month: '' })} className="text-xs text-slate-500 hover:text-slate-700 whitespace-nowrap">Clear</button>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-400">Optional. Leave empty to deduct from the next payroll after approval. E.g. pick January to start recovering from the January salary.</p>
+                </div>
+                <div className="col-span-2 space-y-1.5">
                   <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Reason</label>
                   <input
                     type="text"
@@ -1435,6 +1478,16 @@ export function AdvanceManagement() {
                       className="w-full px-3 py-2 border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-blue-500"
                     />
                   </div>
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Start Deduction From (month)</label>
+                    <input
+                      type="month"
+                      value={approveStartMonth}
+                      onChange={e => setApproveStartMonth(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-blue-500"
+                    />
+                    <p className="text-xs text-slate-400">Optional. Leave empty to deduct from the next payroll.</p>
+                  </div>
                 </>
               ) : (
                 <p className="text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2">
@@ -1485,7 +1538,7 @@ export function AdvanceManagement() {
               )}
               <p className="text-xs text-slate-500">
                 {approveSettlementType === 'Payroll'
-                  ? 'Approving will disburse the advance and begin recovering it from payroll from the next cycle.'
+                  ? (approveStartMonth ? `Approving will disburse the advance and begin recovering it from payroll from ${format(new Date(`${approveStartMonth}-01T00:00:00`), 'MMMM yyyy')}.` : 'Approving will disburse the advance and begin recovering it from payroll from the next cycle.')
                   : 'Approving will disburse the advance; the employee logs receipts against it and you reconcile & close it later.'}
               </p>
             </div>

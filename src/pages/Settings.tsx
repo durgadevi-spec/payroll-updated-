@@ -26,6 +26,7 @@ interface SettingsMap {
   payroll_date: string;
   alert_admin_emails: string;
   alert_hr_emails: string;
+  advance_admin_emails: string;
   timesheet_approval_required: string; // 'true' | 'false'
 }
 
@@ -47,6 +48,7 @@ const defaultSettings: SettingsMap = {
   smtp_host: '', smtp_port: '587', smtp_user: '', smtp_pass: '', smtp_from: '', payroll_date: '1',
   alert_admin_emails: 'sp@ctint.in,durgadevi@ctint.in',
   alert_hr_emails: 'pushpa.p@ctint.in',
+  advance_admin_emails: '',
   timesheet_approval_required: 'false',
 };
 
@@ -282,6 +284,26 @@ export function Settings() {
                     hint="Comma-separated. Receives all alerts."
                   />
                 </div>
+              </div>
+
+              {/* ── Advance Request Notifications (separate from nightly alerts) ── */}
+              <div className="pt-2 border-t border-slate-100 dark:border-slate-700">
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="w-7 h-7 rounded-lg bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
+                    <Bell size={14} className="text-blue-600 dark:text-blue-400" />
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">Advance Request Notifications</p>
+                    <p className="text-[10px] text-slate-400">Emailed instantly whenever an employee or admin raises a new advance request</p>
+                  </div>
+                </div>
+                <Input
+                  label="Advance Approver Emails"
+                  value={settings.advance_admin_emails}
+                  onChange={set('advance_admin_emails')}
+                  placeholder="admin@company.com,finance@company.com"
+                  hint="Comma-separated. Approval / rejection emails go to the employee automatically."
+                />
               </div>
             </>
           )}

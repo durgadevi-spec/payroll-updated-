@@ -539,7 +539,8 @@ export function Payroll() {
         .from('advances')
         .select('employee_id, installment_amount, balance, status, repayment_type')
         .eq('status', 'Active')
-        .gt('balance', 0);
+        .gt('balance', 0)
+        .or(`deduction_start_month.is.null,deduction_start_month.lte.${analysisPayroll.year}-${String(analysisPayroll.month).padStart(2, '0')}-01`);
 
       const advanceByEmp = new Map<string, number>();
       (advancesData || []).forEach((adv: any) => {
@@ -616,7 +617,8 @@ export function Payroll() {
         .from('advances')
         .select('employee_id, installment_amount, balance, status, repayment_type')
         .eq('status', 'Active')
-        .gt('balance', 0);
+        .gt('balance', 0)
+        .or(`deduction_start_month.is.null,deduction_start_month.lte.${genYear}-${String(genMonth).padStart(2, '0')}-01`);
 
       const advanceByEmp = new Map<string, number>();
       (advancesData || []).forEach((adv: any) => {
@@ -1102,6 +1104,7 @@ export function Payroll() {
               .eq('employee_id', item.employee_id)
               .eq('status', 'Active')
               .gt('balance', 0)
+              .or(`deduction_start_month.is.null,deduction_start_month.lte.${payroll.year}-${String(payroll.month).padStart(2, '0')}-01`)
               .order('created_at', { ascending: true });
 
             if (activeAdvances && activeAdvances.length > 0) {

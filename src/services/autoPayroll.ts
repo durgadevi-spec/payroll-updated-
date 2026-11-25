@@ -184,7 +184,9 @@ async function generatePayrollForMonth(month: number, year: number): Promise<{ p
   const calculationType: 'monthly' | 'custom' | 'working_days' = 'monthly'; // manual dialog default
 
   const advRes = await payrollPool.query(
-    `SELECT employee_id, installment_amount, balance, status, repayment_type FROM advances WHERE status = 'Active' AND balance > 0`
+    `SELECT employee_id, installment_amount, balance, status, repayment_type FROM advances WHERE status = 'Active' AND balance > 0
+       AND (deduction_start_month IS NULL OR deduction_start_month <= make_date($1::int, $2::int, 1))`,
+    [year, month]
   );
   const advanceByEmp = new Map<string, number>();
   advRes.rows.forEach((adv: any) => {

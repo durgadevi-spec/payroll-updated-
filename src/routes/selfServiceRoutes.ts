@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import { payrollPool } from './payrollRoutes.ts';
+import { notifyAdvanceRaised } from '../lib/advanceEmails.ts';
 import * as dotenv from 'dotenv';
 dotenv.config({ path: './.env' });
 
@@ -139,6 +140,7 @@ selfServiceRouter.post('/me/advances/request', async (req: AuthenticatedRequest,
     );
 
     res.status(201).json(result.rows[0]);
+    await notifyAdvanceRaised(client, result.rows[0].id); // response already sent; connection is released in finally
   } catch (err) {
     console.error('Error raising advance request:', err);
     res.status(500).json({ error: 'Failed to raise advance request' });
